@@ -1,0 +1,5 @@
+psycopg[binary,pool]>=3.2
+pillow>=11.0
+pillow-heif>=0.20
+fastapi>=0.115
+uvicorn[standard]>=0.32

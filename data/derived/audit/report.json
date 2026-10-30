@@ -1,0 +1,42 @@
+{
+  "roots": [
+    "/media/fixtures"
+  ],
+  "generated_at": "2026-10-30T11:52:38",
+  "totals": {
+    "files": 7,
+    "bytes": 243950,
+    "dirs": 0,
+    "unreadable": 0
+  },
+  "by_ext": {
+    ".jpg": 5,
+    ".mp4": 1,
+    ".heic": 1
+  },
+  "by_year": {
+    "2026": 7
+  },
+  "duplicates": {
+    "groups": 1,
+    "redundant_files": 1,
+    "wasted_bytes": 39487,
+    "capped": false
+  },
+  "exif_sample": {
+    "sampled": 7,
+    "with_capture_time": 6,
+    "tz_source": {
+      "unknown": 1,
+      "exif": 4,
+      "utc": 1,
+      "gps": 1
+    },
+    "devices": {
+      "iPhone 15 Pro": 4,
+      "FC3582": 1
+    }
+  },
+  "unsupported": {},
+  "flags": {}
+}

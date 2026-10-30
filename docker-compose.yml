@@ -1,0 +1,55 @@
+name: photo-vault
+
+# 只挂载「一个」父目录，是 link（硬链接）模式能工作的前提。
+# Docker 里每个 bind mount 都是独立设备，素材和 vault 分开挂载 → 硬链接会报 EXDEV。
+#
+# 推荐布局（宿主机）：
+#   D:\photo\            ← HOST_ROOT
+#       ├── vault\       ← 内容寻址库（本系统写入）
+#       ├── derived\     ← 缩略图/代理（可随时删，会重建）
+#       └── source\      ← 你现有的相册（原样不动）
+#
+# 这样素材与 vault 在同一个挂载点里，硬链接可用：不额外占空间、秒级入库。
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-vault}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vault}
+      POSTGRES_DB: ${POSTGRES_DB:-vault}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      # 宿主机 5432 常被占用，这里避让
+      - "${DB_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-vault} -d ${POSTGRES_DB:-vault}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:-vault}@db:5432/${POSTGRES_DB:-vault}
+      VAULT_ROOT: /host/vault
+      DERIVED_ROOT: /host/derived
+      LANDING_ROOT: /host/vault/.landing
+      DEFAULT_TZ_OFFSET_MIN: ${DEFAULT_TZ_OFFSET_MIN:-480}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      # 唯一的业务挂载点。必须是本地固定盘：
+      # SMB/UNC 网络盘无法可靠 bind-mount（WSL2 限制），且不支持硬链接。
+      - ${HOST_ROOT:-./host}:/host
+
+volumes:
+  pgdata:
