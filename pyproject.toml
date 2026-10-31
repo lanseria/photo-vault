@@ -1,0 +1,45 @@
+[project]
+name = "photo-vault"
+version = "0.1.0"
+description = "本地优先的个人照片/视频资产管理服务"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "psycopg[binary,pool]>=3.2",
+    "pillow>=11.0",
+    "pillow-heif>=0.20",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+]
+
+[project.scripts]
+photo-vault = "vault.cli:main"
+
+[dependency-groups]
+# ML worker 用（宿主机运行，不进 app 镜像）：uv sync --group ml
+# onnxruntime-gpu：RAM++ 打标 + InsightFace 人脸，共用一个 EP。
+#   · 窗口很窄，两个边界都是实测出来的：
+#     下限 1.24.4 —— RAM++ INT8 图里有 ConvInteger，1.23 及以下没实现，加载即报
+#                    NOT_IMPLEMENTED；
+#     上限 <1.27  —— 1.27 起官方转向 CUDA 13，而 CUDA 13 已放弃 Pascal（1070 Ti = SM 6.1），
+#                    CUDA EP 会静默初始化失败、退回 CPU（不报错，只是慢 20 倍）。
+#   · 没装 CUDA 的机器照样能装能跑，会自动回退 CPUExecutionProvider。
+# opencv-python-headless：人脸对齐（warpAffine）与 letterbox（resize）用，
+#   与官方 insightface 的预处理逐位一致；不需要 GUI 版。
+# 不需要 torch/transformers——打标和人脸都走 ONNX，视频打标的 VLM 走独立的
+#   llama.cpp 子进程（models/llama.cpp/bin + models/qwen3-vl-4b 的 GGUF），
+#   不占 Python 依赖；缺了它 worker 会自动跳过 video 任务。
+ml = [
+    "onnxruntime-gpu>=1.24.4,<1.27",
+    "opencv-python-headless>=4.10",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["vault"]
+
+[tool.uv]
+# 锁定策略：Docker 构建用 `uv sync --frozen`，与 uv.lock 严格一致
