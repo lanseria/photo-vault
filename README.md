@@ -6,6 +6,9 @@
 AI 打标（RAM++）和人脸（InsightFace）已经接上，都在宿主机 worker 里跑。
 数据模型、队列、内容寻址从一开始就为它们留好了位置。
 
+在相册之外还有两块：**素材库**（同一张 assets 表的 `library` 轴，AI 结果复用，
+用来手动整理可剪的素材）和**影视库**（电影/剧集/字幕，只登记路径，不搬家、不跑 AI）。
+
 ---
 
 ## 30 秒跑起来
@@ -346,6 +349,231 @@ uv run --group ml python -m ml.vlm --reaggregate --min-share 0.75
 
 ---
 
+## 剪辑交付：搜索 → 剪辑箱 → 拖进剪映
+
+相册整理完只是"存得好"；剪辑要的是"取得快"。这一段把素材送到剪辑软件门口。
+
+### 两个硬边界（决定了架构）
+
+1. **浏览器拖不出文件。** 从网页拖一个 `<img>`／`<a>` 到剪映，外部程序只能拿到
+   `text/uri-list`，拿不到真实路径——Chromium 出于安全不会把本地路径交出去。
+   所以"拖拽"这个动作必须有原生进程参与，纯 Web 做不到。
+2. **容器摸不到桌面。** app 跑在 Docker 里（`/host` → `E:\photo`），进程在 Linux 命名空间，
+   `explorer.exe`、剪贴板、OLE 拖拽全都调不到。
+
+于是分工：**容器只负责数据**（查库、建硬链接、写清单），**宿主机桥负责桌面**
+（`vault/bridge.py`，`127.0.0.1:8099`）。桥没起也能用，只是出稿后要自己复制路径。
+
+### 用法（三步）
+
+1. 顶栏筛选条：`🎬 视频` + `15–60s` + `≥1080p`；搜索框同时搜文件名、原目录、
+   AI/VLM 标签、视频描述、OCR、人物名；
+2. 「选择」→ 勾选 → 底部「剪辑箱」（灯箱里也有）。**可以跨多次搜索反复加**——
+   箱子在数据库里，不是页面临时变量；
+3. 切到「✂️ 剪辑箱」→「出稿」→ **资源管理器自动打开并停在出稿目录** → 全选拖进剪映。
+
+> 剪映不吃"粘贴文件列表"，所以交付的终点就是资源管理器：`出稿` 把文件摆好、打开目录，
+> 你只需要框选拖一次。想再次打开上次的目录，剪辑箱页有「打开目录」。
+
+### 出稿做了什么
+
+`<HOST_ROOT>\derived\cuts\<箱名>\` 下生成：
+
+| 文件 | 说明 |
+|---|---|
+| `001_20200917_115712_IMG_5135.MP4` | **硬链接**指向 vault 原件：零额外空间、瞬时、是真文件（不是快捷方式） |
+| `cutlist.csv` | 序号／时长／分辨率／标签，Excel 直接开（UTF-8 BOM） |
+
+命名是设计过的：`序号_拍摄时间_原名.ext`。剪映素材库默认按文件名排序，
+于是**排序 = 你在箱子里的顺序**，同一时段的素材天然挨着。重新出稿会重排并清掉旧文件
+（`stale_removed`），所以出稿目录是"每次覆盖"的幂等产物——但**剪映草稿记的是绝对路径，
+剪完前别删这个目录**。
+
+跨卷（`EXDEV`）自动退回拷贝，所以 derived 和 vault 不在同一卷时也能用，只是会占空间。
+
+### 宿主机桥
+
+```bash
+uv run photo-vault bridge              # 前台跑，127.0.0.1:8099
+uv run photo-vault bridge --install    # 一次性：设为开机自启（HKCU\...\Run，pythonw 无黑窗）
+uv run photo-vault bridge --uninstall  # 撤销
+```
+
+剪辑箱页右上角有「桥 · 在线 / 未启动」的状态灯。桥没起也不影响出稿，只是不自动开文件夹，
+路径会自动复制到剪贴板。
+
+| 接口 | 作用 |
+|---|---|
+| `POST /reveal {path}` | 目录 → 打开；文件 → 打开所在目录并选中 |
+| `POST /clipboard {paths}` | 文件列表进剪贴板（CF_HDROP）。**剪映不支持粘贴文件，仅备用**（Premiere/达芬奇可以） |
+| `POST /open {path}` | 用系统默认播放器打开影视文件（MKV/AVI 浏览器放不了） |
+| `GET /health` | 前端探状态 |
+
+只绑 127.0.0.1，且只接受 `127.0.0.1` / `localhost` 页面的跨域请求——否则任意网页都能
+往你剪贴板里塞文件。
+
+**不想要这个常驻进程？** 把 web 也跑在宿主机上就不需要桥：
+
+```bash
+$env:DATABASE_URL='postgresql://vault:vault@localhost:5433/vault'
+$env:VAULT_ROOT='E:\photo\vault'; $env:DERIVED_ROOT='E:\photo\derived'
+uv run photo-vault serve --port 8081
+```
+
+这种部署下 app 进程本身就在 Windows 上，出稿时后端直接 `ShellExecute` 开文件夹
+（deliver 返回 `opened=true`，前端就不再去问桥）。代价是失去容器的隔离和自动重启。
+
+### 还没做的
+
+- **原生拖拽**：从网页直拖不行，要一个常驻浮窗（`IDataObject` + `IDropSource`）。
+  体验最好，但那是 1–2 天的 COM 活；现在"开目录 + 框选拖"只多一下。
+- **剪映草稿**：跳过导入直接成片，但 draft schema 跟剪映版本强绑定（你装的是 11.6），
+  风险高于收益。
+- **素材使用记录**：同一段素材被哪个片子用过、用了第几秒，还没记。
+- **代理**：4K HEVC 多轨预览卡的话再做（1080p H.264 同 basename，剪完「替换」回原片）。
+
+---
+
+## 素材库：相册之外的第二个归属
+
+素材库不是"另一个库"，而是同一张 `assets` 表上的 `library` 轴（`gallery` / `material`）。
+标签、人脸、视频摘要、剪辑箱全部复用 —— **换归属不复制文件，也不重跑 AI**。
+
+### 用法
+
+1. 顶部切到「图库」，点右上角「选择」→ 勾选素材（有「全选」）→ 底部「素材库」；
+2. 切到「素材库」，底部按钮变成「图库」，可以整批移回去；
+3. 素材库里的「AI 识别」把选中项（没选中就是当前加载的全部）排进 `jobs`：
+   RAM++ 打标 / 人脸 / 视频关键帧。已经排过、跑过、或正在跑的会被跳过，重复点不涨队列；
+4. 手动整理靠已有的标签、喜欢、搜索和筛选轴（类型/时长/分辨率），不用学新东西。
+
+也可以命令行直接导入素材库，不经过"先进相册再移动"：
+
+```bash
+uv run photo-vault ingest D:\素材 --mode copy --library material
+```
+
+### 设计取舍
+
+| 选择 | 原因 |
+|---|---|
+| `assets.library` 单值列，不是多对多 | 一件素材要么是"回忆"、要么是"可用的素材"；两边都能看到会让"删的是哪份"变成歧义 |
+| 不复制文件、不复制标签 | 素材库的价值是"筛出来"，不是"再存一份"；复制会让 2TB 变 4TB |
+| 回收站是全局的 | 误删要能找回来，恢复后回到原来的库（`library` 列不变） |
+| 收藏 / 标签视图跟着当前库走 | 在素材库里点 ❤️ 看到的是素材的收藏，标题会标「· 素材库」；人物是跨库实体视图，不分库 |
+
+迁移（`photo-vault initdb`）给所有老数据补 `library='gallery'`，相册不会变空。
+
+---
+
+## 网页导入：拖拽即入库
+
+日常新增的照片 / 视频不用再从盘里扫：打开 `http://localhost:8081`，点右上角
+「导入」，把文件（或整个文件夹）拖进窗口，选「图库 / 素材库」，剩下的它自己做。
+
+- 收流直接写 landing（与 vault 同一文件系统），**边收边算 sha256**；重复内容按
+  哈希当场跳过，新文件 `os.replace` 进 vault —— 全程只写一次盘，GB 级视频也不用
+  先落容器临时盘再拷一遍。
+- 和 `vault ingest` 是同一条流水线：EXIF / ffprobe、时区、Live Photo 配对、缩略图、
+  AI 入队全部一致。上传的资产和扫盘进来的没有区别。
+- 一次拖拽 = 一个 batch：同批的 `HEIC + MOV` 会配成一张 Live Photo；重传同一个
+  文件返回「已在图库 / 素材库」，不产生副本。
+- 导入完成自动排进 `jobs`（打标 / 人脸 / 视频），ML worker 在跑就会接着处理。
+- 文件夹可以整个拖，会递归展开；`.xmp`、`.aae` 这类伴生文件自动忽略。
+- 深链 `http://localhost:8081/#upload` 直接打开导入面板。
+
+批量搬旧相册还是用 CLI 更快：上传受 Docker bind mount 限制，一次几千个文件不如
+`vault ingest` 直接读盘。
+
+---
+
+## 影视库：只保存，不识别
+
+电影 / 电视剧 / 字幕的登记与播放。和相册的取舍正好相反：
+**文件留在原地，库里只存路径和元数据**，不搬进 vault、不算哈希、不跑任何模型。
+
+### 为什么不能照搬相册
+
+- 一部电影 10–50 GB，一部剧几十到上百 GB；`--mode link` 只对同卷有效，
+  放到另一块盘就只能拷贝 —— 那等于把用户的硬盘复制一遍；
+- 影视没有拍摄时间、没有 EXIF，不需要人脸/RAM++，塞进 `assets` 会污染相册的
+  时间轴、统计、AI 队列和剪辑搜索；
+- 播放、季集结构、字幕是另一套形状，单独三张表比往 `assets.payload` 里硬塞干净。
+
+### 首次配置
+
+影视目录通过**第二个挂载点**进容器，和 vault 无关，可以放在另一块盘：
+
+```ini
+# .env
+MEDIA_HOST_ROOT=E:\Movies     # 你的电影/剧集目录；容器里看到的是 /media
+```
+
+```bash
+docker compose up -d --build --force-recreate app   # 挂载点变了，必须重建容器
+```
+
+目录里可以混放电影和剧集，命名不用整理：
+
+| 文件名 / 目录 | 识别结果 |
+|---|---|
+| `The.Matrix.1999.1080p.BluRay.x264-GROUP.mkv` | 电影《The Matrix》1999 |
+| `让子弹飞.2010.1080p.mkv` | 电影《让子弹飞》2010 |
+| `Breaking.Bad.S01E02.720p.mkv` | 剧集《Breaking Bad》S01E02 |
+| `Breaking Bad - S01E02 - Cat's in the Bag.mkv` | 同上，带集名 |
+| `Show/Season 2/03 - Bit by a Dead Bee.mkv` | 剧集《Show》S02E03 |
+| `Anime/[SubsPlease] Frieren - 05 [1080p].mkv` | 剧集《Frieren》E05 |
+| `进击的巨人 第01集.mp4` | 剧集《进击的巨人》E01 |
+
+识别是**保守的**：没有季集证据的文件一律当电影（"Baraka - 01" 不会被拆成剧集）。
+认错了就在网页里删掉条目重新导入，或命令行加 `--kind movie|series` 强制。
+
+### 导入
+
+```bash
+# 先干跑：只打印解析结果，不写库
+docker compose exec app python -m vault.cli cinema-import "E:\Movies" --dry-run
+
+# 正式导入（可反复跑：同一文件是更新，不是重复）
+docker compose exec app python -m vault.cli cinema-import "E:\Movies"
+
+# 看结果
+docker compose exec app python -m vault.cli cinema-list
+```
+
+也可以直接在网页「影视 → ＋ 添加影视」填路径，进度会实时显示（后台线程跑，不怕大库超时）。
+
+### 字幕
+
+导入时自动识别同目录的 sidecar：`Movie.srt` / `Movie.zh-CN.srt` / `Movie.chs.ass`，
+语言从后缀推断（简体/繁体/中英/English/日本語…）。播放时：
+
+- SRT / VTT / ASS / SSA → 按需转成 WebVTT 给 `<track>`，**不改原文件**；
+- ASS 只保留对白文本，样式和特效会丢；要完整字幕用系统播放器（见下）。
+
+完整的字幕下载/匹配（OpenSubtitles 之类）还没做，表结构已经留好。
+
+### 播放
+
+| 场景 | 怎么走 |
+|---|---|
+| MP4 / WebM（浏览器能解） | 灯箱内直接播，支持拖动进度（Range 206） |
+| MKV / AVI / TS | 浏览器基本放不了 → 播放器右上角「系统播放器」：宿主模式下后端直接 `ShellExecute`，容器模式走 `photo-vault bridge` 的 `/open` |
+| 字幕 | 网页播放用 `<track>`；系统播放器会自动加载同目录字幕 |
+
+影视条目的片名 / 年份 / 简介可以在网页里改；「删除」只删登记记录，**不删文件**。
+
+### 边界
+
+- 不做文件重命名/移动/删除，删条目后文件原样还在；
+- 没有 TMDB 刮削：片名和年份来自文件名，海报是抽帧（15% 处 + 模糊填充成 2:3）；
+- 同一"季集槽位"有两个版本（1080p + 4K）时后扫到的覆盖先扫到的；
+- 不查重、不算哈希 —— 这是为了几十 GB 的片子不读一遍；
+- 字幕识别只看同目录 / `Subs/`，按"去掉发布标签后的片名骨架"匹配（`Movie.zh-CN.srt` 能配
+  `Movie.1080p.BluRay.mkv`），不猜别的目录；
+
+---
+
 ## 已实现
 
 | 能力 | 状态 | 说明 |
@@ -364,9 +592,20 @@ uv run --group ml python -m ml.vlm --reaggregate --min-share 0.75
 | 视频 | ✅ | ffprobe 元数据、creation_time、封面抽帧 |
 | 视频打标 | ✅ | 关键帧（均匀候选 + 最远点采样）→ Qwen3-VL-4B 逐帧标注 → 票数聚合 |
 | 按原目录浏览 | ✅ | `origin_rel` + `/api/folders`，Web 上直接筛"原来放在哪个文件夹" |
+| 素材库 | ✅ | `assets.library`（gallery/material）：移进移出、AI 结果复用、收藏/标签/人物跟随当前库 |
+| 素材库 AI 入队 | ✅ | 选中 →「AI 识别」：按需排 RAM++ / 人脸 / 视频关键帧，已排过的跳过 |
+| 网页导入 | ✅ | 拖拽 / 选文件直传：边收边算 sha256、重复跳过、`os.replace` 入库（只写一次盘）；图库 / 素材库可选 |
+| 影视库 | ✅ | `cinema_titles` / `cinema_episodes` / `cinema_subtitles`：只登记路径，不搬文件、不跑 AI |
+| 影视命名识别 | ✅ | SxxEyy / 1x02 / 第01集 / Season 目录 / 番剧式；电影名去发布组噪声 |
+| 影视字幕 | ✅ | 同目录 sidecar 自动识别（srt/ass/ssa/vtt），播放时转 WebVTT |
+| 影视播放 | ✅ | MP4/WebM 直接播（Range）；MKV/AVI 交给系统播放器（宿主模式或桌面桥） |
+| 剪辑搜索轴 | ✅ | 类型／时长／最小短边；`q` 同时搜标签、视频描述、OCR、人物名 |
+| 剪辑箱 | ✅ | `bins`/`bin_items`，跨多次搜索累积、可排序，顺序即出稿编号 |
+| 出稿到剪辑软件 | ✅ | 硬链接物化成 `derived/cuts/<箱名>/` + `cutlist.csv`，命名带拍摄时间 |
+| 宿主机桥 | ✅ | `photo-vault bridge`：资源管理器定位 + 状态灯 + `--install` 开机自启 |
 | 反向对账 | ✅ | `reconcile`：磁盘有、库里没有的文件重新登记（顺带校验哈希） |
 | 环境体检 | ✅ | `doctor`：磁盘、原子性、DB、ffmpeg、未登记文件 |
-| Live Photo 配对 | ⚠️ | 同目录同文件名配对，未用 ContentIdentifier |
+| Live Photo 配对 | ⚠️ | 同目录同文件名、或同一次上传的 batch 内配对，未用 ContentIdentifier |
 | 近似去重 | ⚠️ | pHash 已入库，聚类未做 |
 | RAW | ❌ | CR3/NEF/ARW/DNG 只能落盘，读不出元数据 |
 | 人脸检测 / 识别 | ✅ | SCRFD 10G + ArcFace R50（InsightFace ONNX，CUDA），512 维向量 |
@@ -382,7 +621,7 @@ photo-vault/
 ├── pyproject.toml            # 项目元数据 + 依赖声明（uv）
 ├── uv.lock                   # 锁定文件：本地与 Docker 装同一套版本
 ├── .python-version           # 固定 Python 3.12（与镜像一致）
-├── docker-compose.yml        # db(pgvector/pg16) + app，单挂载点
+├── docker-compose.yml        # db(pgvector/pg16) + app：/host（相册）+ /media（影视）
 ├── Dockerfile                # 基于 uv sync --frozen 安装依赖
 ├── db/
 │   ├── 001_init.sql
@@ -391,16 +630,21 @@ photo-vault/
 │   ├── 004_semantic.sql
 │   ├── 005_ram_tags.sql    # RAM++ 单轨 + ml_meta
 │   ├── 006_faces.sql       # persons / faces / 512 维 HNSW
-│   └── 007_video.sql       # video_frames / video_summaries
+│   ├── 007_video.sql       # video_frames / video_summaries
+│   ├── 008_clip.sql        # bins / bin_items + trigram 搜索索引
+│   ├── 009_library.sql     # assets.library：相册 gallery / 素材库 material
+│   └── 010_cinema.sql      # 影视条目 / 剧集 / 字幕（只存路径，不搬文件）
 ├── vault/
-│   ├── config.py
+│   ├── config.py           # 环境配置 + 宿主机/容器路径映射
 │   ├── db.py
 │   ├── hashutil.py         # 流式 sha256 / pHash / 内容寻址
 │   ├── meta.py             # EXIF / ffprobe / 时区判定 / 缩略图
 │   ├── audit.py            # 入库前体检
 │   ├── ingest.py           # 入库状态机（copy / link）
-│   ├── cli.py              # initdb | audit | ingest | stats | doctor | reconcile | serve
-│   └── web.py              # FastAPI + 单页 UI（图库 / 人物 / 标签）
+│   ├── cinema.py           # 影视：命名解析 / ffprobe / 字幕识别 / 导入（不跑 AI）
+│   ├── cli.py              # initdb | audit | ingest | stats | doctor | reconcile | serve | bridge | cinema-import | cinema-list
+│   ├── bridge.py           # 宿主机桥：explorer 定位 / 剪贴板 / 系统播放器（Windows）
+│   └── web.py              # FastAPI + 单页 UI（图库 / 素材库 / 人物 / 标签 / 剪辑箱 / 影视）
 ├── ml/
 │   ├── faces.py            # SCRFD 检测 + ArcFace 识别 + 模型下载
 │   ├── cluster.py          # 人脸聚类 → 匿名人物
@@ -411,11 +655,14 @@ photo-vault/
 │   ├── worker.py           # jobs 消费（tags / faces / video）
 │   ├── enqueue.py          # 入队
 │   └── assets/ram/         # 4585 类标签表 + 阈值 + 中文对照
-├── scripts/make_fixtures.py
+├── scripts/
+│   ├── make_fixtures.py
+│   └── clip_probe.ps1      # 验硬链接 / 剪贴板 CF_HDROP 是否被剪辑软件接受
 └── tests/
     ├── test_time.py        # 时区回归测试（10 个用例）
     ├── test_faces.py       # 命名 / 并查集 / 对齐 / NMS（无模型、无库）
-    └── test_video.py       # 抽帧 / 聚合 / 输出解析（无模型、无库）
+    ├── test_video.py       # 抽帧 / 聚合 / 输出解析（无模型、无库）
+    └── test_cinema.py      # 影视命名解析 / 字幕语言 / SRT→VTT / 海报（无库）
 ```
 
 ---
@@ -431,7 +678,9 @@ photo-vault/
 
 **4. 幂等键是内容哈希，不是文件名。** `DJI_0001.MP4` 每张卡都会重名。
 
-**5. 单挂载点不是洁癖，是硬性要求。** 跨 bind mount 的硬链接必然失败（EXDEV）。
+**5. 相册只有一个挂载点，影视库另算。** 相册的素材和 vault 必须同一个 bind mount（`/host`），
+跨挂载点的硬链接必然失败（EXDEV）；影视库（`/media`）是独立挂载且不做硬链接，所以放在另一块盘
+完全没问题——两条路径的边界不同，不要混着套。
 
 ---
 

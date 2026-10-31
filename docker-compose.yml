@@ -42,6 +42,13 @@ services:
       VAULT_ROOT: /host/vault
       DERIVED_ROOT: /host/derived
       LANDING_ROOT: /host/vault/.landing
+      # 只用来"生成给人/给剪辑软件看的路径"（出稿目录要交给资源管理器），
+      # 落盘一律走 /host。不设也能跑，只是接口返回容器内路径。
+      HOST_PATH_ROOT: ${HOST_ROOT:-./host}
+      # 影视库不进 vault：只登记路径。电影/剧集放在 MEDIA_HOST_ROOT，
+      # 容器里挂成 /media，库中存相对路径，换盘只改 env。
+      MEDIA_ROOT: /media
+      MEDIA_HOST_ROOT: ${MEDIA_HOST_ROOT:-./media}
       DEFAULT_TZ_OFFSET_MIN: ${DEFAULT_TZ_OFFSET_MIN:-480}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
@@ -50,6 +57,9 @@ services:
       # 唯一的业务挂载点。必须是本地固定盘：
       # SMB/UNC 网络盘无法可靠 bind-mount（WSL2 限制），且不支持硬链接。
       - ${HOST_ROOT:-./host}:/host
+      # 影视库独立挂载：和 vault 同一个盘会形成嵌套挂载，Docker 允许；
+      # 放在另一块盘（D:\Movies）也完全可以 —— 影视不需要硬链接。
+      - ${MEDIA_HOST_ROOT:-./media}:/media
 
 volumes:
   pgdata:

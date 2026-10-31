@@ -11,6 +11,11 @@ from pathlib import Path
 from . import hashutil, meta
 from .config import Config
 
+# Live Photo 配对：静帧 + 动态部分。别的组合（jfif+mpeg、jpg+mts…）只是同名巧合，
+# 合并会把视频错算成图片的 live_motion。
+LIVE_STILL_EXT = {".heic", ".heif", ".jpg", ".jpeg"}
+LIVE_MOTION_EXT = {".mov", ".mp4"}
+
 
 @dataclass
 class Stats:
@@ -126,6 +131,25 @@ def _video_poster(src: Path, dst: Path) -> bool:
         return False
 
 
+def _live_pair_ok(conn, asset_id: str, video: Path) -> bool:
+    """只有"iPhone 风格静帧 + .mov/.mp4"才认作 Live Photo。
+
+    原来的规则是"同目录同 stem 的任意图片 + 任意视频"，会把素材库里
+    `cover.jfif` + `cover.mpeg`、`clip.jpg` + `clip.mts` 这种同名巧合也合并成
+    live_photo —— 视频被挂成 live_motion，分辨率/时长全按图片算。收紧后：
+      · 静帧只认 .heic/.heif/.jpg/.jpeg（Live Photo 的两种导出）
+      · 动态部分只认 .mov/.mp4
+    真正的 iPhone Live Photo 仍然配对（HEIC+MOV 或 JPG+MOV）。
+    """
+    if video.suffix.lower() not in LIVE_MOTION_EXT:
+        return False
+    row = conn.execute(
+        "select ext from files where asset_id=%s and role='original' limit 1",
+        (asset_id,),
+    ).fetchone()
+    return bool(row) and (row["ext"] or "").lower() in LIVE_STILL_EXT
+
+
 def ingest_file(
     conn,
     cfg: Config,
@@ -136,33 +160,68 @@ def ingest_file(
     dry_run: bool = False,
     mode: str = "copy",
     root: Path | None = None,
+    library: str = "gallery",
+    *,
+    sha_hint: tuple[str, int] | None = None,
+    origin: tuple[str, str] | None = None,
+    stem_key: tuple[Path, str] | None = None,
 ) -> None:
     """
     mode:
       copy  —— 拷贝进 vault（默认，最安全，占双份空间）
       link  —— 硬链接进 vault（同卷零额外空间，秒级；原目录删掉也不影响库）
+      move  —— 文件已经在 landing（网页上传边收边写），直接 os.replace 进 vault。
+               全流程只写一次盘；重复文件在 landing 里删掉。
+
+    library:
+      gallery  —— 相册（默认）
+      material —— 素材库。直属落库，不经过"先进相册再移动"那一步。
+
+    sha_hint / origin / stem_key:
+      网页上传专用。sha_hint 是收流时已经算好的哈希（避免再读一遍 GB 级视频）；
+      origin 覆盖 files 里的来源信息（上传没有磁盘路径）；stem_key 让同一批上传里
+      的 HEIC+MOV 也能配成 Live Photo（临时文件名是随机的，不能拿它当 stem）。
     """
+    if library not in ("gallery", "material"):
+        raise ValueError("library 只能是 gallery 或 material")
     stats.scanned += 1
     ext = path.suffix.lower()
 
     # ---- 1. 取哈希
     #   copy: 边拷到 landing 边算（一次读、一次写）
     #   link: 只读一遍算哈希，随后直接建硬链接
+    #   move: 已经在 landing，哈希由调用方在收流时算好
     tmp: Path | None = None
-    if dry_run or mode == "link":
+    if mode == "move":
+        tmp = path
+        sha, nbytes = sha_hint or hashutil.sha256_file(path)
+    elif dry_run or mode == "link":
         sha, nbytes = hashutil.sha256_file(path)
     else:
         tmp = hashutil.new_landing_path(cfg.landing_root)
         sha, nbytes = hashutil.copy_and_hash(path, tmp)
 
+    key = stem_key or (path.parent, path.stem)
+
     # ---- 2. 精确去重
+    #  查任意 role：Live Photo 的 MOV 是以 live_motion 入库的，只看 role='original'
+    #  会让同一段视频在每次重扫/重传时再登记成一条独立视频（实测重扫会把 773 个
+    #  live_motion 又存一遍）。
     dup = conn.execute(
-        "select id from files where sha256=%s and role='original'", (bytes.fromhex(sha),)
+        """select f.asset_id, a.kind, a.library
+             from files f join assets a on a.id=f.asset_id
+            where f.sha256=%s limit 1""",
+        (bytes.fromhex(sha),),
     ).fetchone()
     if dup:
         stats.duplicate += 1
         if tmp:
-            tmp.unlink(missing_ok=True)
+            tmp.unlink(missing_ok=True)      # move: 上传的临时文件直接丢掉
+        # 静帧已经在库里（比如上次导过）时，这次补传的 MOV 仍然能挂成 live_motion。
+        # 只在同一个库内配对：跨库合并会让"导入素材库"看起来像没导进去。
+        if (dup["kind"] in ("photo", "raw") and dup["library"] == library
+                and ext in LIVE_MOTION_EXT):
+            stem_map.setdefault(key, str(dup["asset_id"]))
         return
 
     # ---- 3. 探测元数据 + 时区
@@ -185,7 +244,12 @@ def ingest_file(
     final.parent.mkdir(parents=True, exist_ok=True)
 
     used_mode = "copy"
-    if mode == "link":
+    if mode == "move":
+        assert tmp is not None
+        os.replace(tmp, final)            # landing 与 vault 同文件系统，原子且不复制
+        stats.copied += 1
+        stats.bytes += nbytes
+    elif mode == "link":
         try:
             os.link(path, final)          # 同卷：O(1)，不占额外空间
             used_mode = "link"
@@ -203,20 +267,22 @@ def ingest_file(
         stats.bytes += nbytes
 
     try:
-        origin_abs = str(path)
-        try:
-            origin_rel = path.relative_to(root).as_posix() if root else path.name
-        except ValueError:
-            origin_rel = path.name
+        origin_abs = origin[0] if origin else str(path)
+        if origin:
+            origin_rel = origin[1]
+        else:
+            try:
+                origin_rel = path.relative_to(root).as_posix() if root else path.name
+            except ValueError:
+                origin_rel = path.name
 
         # ---- 5. Live Photo 配对（同目录同文件名，HEIC + MOV）
-        stem_key = (path.parent, path.stem)
         kind = p.kind
         role = "original"
-        asset_id = stem_map.get(stem_key)
+        asset_id = stem_map.get(key)
 
         with conn.transaction():
-            if asset_id and p.kind == "video":
+            if asset_id and p.kind == "video" and _live_pair_ok(conn, asset_id, path):
                 role = "live_motion"
                 kind = "live_photo"
                 conn.execute(
@@ -228,20 +294,22 @@ def ingest_file(
                     """
                     insert into assets
                       (kind, taken_at_local, tz_offset_min, tz_source, taken_at_utc,
-                       device_id, lens, width, height, duration_ms, gps)
+                       device_id, lens, width, height, duration_ms, gps, library)
                     values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                             case when %s::float8 is null or %s::float8 is null then null
-                                 else point(%s::float8,%s::float8) end)
+                                 else point(%s::float8,%s::float8) end,
+                            %s)
                     returning id
                     """,
                     (
                         kind, local, offset, tz_source, utc, device_id, p.lens,
                         p.width, p.height, p.duration_ms,
                         p.gps_lat, p.gps_lon, p.gps_lon, p.gps_lat,
+                        library,
                     ),
                 ).fetchone()
                 asset_id = row["id"]
-                stem_map[stem_key] = asset_id
+                stem_map[key] = asset_id
 
                 conn.execute(
                     """insert into exif (asset_id, iso, aperture, shutter, focal_mm, orientation, raw)
@@ -258,7 +326,7 @@ def ingest_file(
                    on conflict (sha256, role) do nothing""",
                 (asset_id, role, bytes.fromhex(sha), nbytes, p.mime, ext, rel,
                  p.width, p.height, hashutil.average_hash(final),
-                 source_id, str(path), used_mode, origin_abs, origin_rel),
+                 source_id, origin_abs, used_mode, origin_abs, origin_rel),
             )
     except Exception:
         final.unlink(missing_ok=True)
@@ -290,7 +358,10 @@ def run_ingest(
     dry_run: bool = False,
     progress_every: int = 200,
     mode: str = "copy",
+    library: str = "gallery",
 ) -> Stats:
+    if library not in ("gallery", "material"):
+        raise ValueError("library 只能是 gallery 或 material")
     cfg.ensure_dirs()
     stats = Stats()
     stem_map: dict[tuple[Path, str], str] = {}
@@ -302,7 +373,11 @@ def run_ingest(
     run_id = run_row["id"]
     conn.commit()
 
+    # 影视库目录永远不进相册：片子不是"照片资产"，也不该被算哈希/拷贝/打标。
+    # 它通常挂在 HOST_ROOT 下面的 media/，不排除的话 `ingest <HOST_ROOT>` 会顺手吃进去。
     exclude = [cfg.vault_root, cfg.derived_root, cfg.landing_root]
+    if cfg.media_root not in exclude:
+        exclude.append(cfg.media_root)
 
     try:
         for root in roots:
@@ -312,7 +387,7 @@ def run_ingest(
                 try:
                     ingest_file(
                         conn, cfg, path, source_id, stem_map, stats,
-                        dry_run=dry_run, mode=mode, root=root,
+                        dry_run=dry_run, mode=mode, root=root, library=library,
                     )
                     if not dry_run:
                         conn.commit()

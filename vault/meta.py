@@ -22,11 +22,16 @@ EXIF_IFD = 0x8769
 GPS_IFD = 0x8825
 
 IMAGE_EXT = {
-    ".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp",
+    ".jpg", ".jpeg", ".jfif", ".jpe", ".png", ".heic", ".heif", ".webp",
     ".tif", ".tiff", ".bmp", ".gif", ".avif",
 }
 RAW_EXT = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".rw2", ".pef", ".srw"}
-VIDEO_EXT = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".insv", ".360", ".lrv", ".3gp"}
+# 视频容器。注意故意不收 .ts：D:\图片来源 这类素材目录里 .ts 是 TypeScript 源码，
+# 收进来会把代码当视频哈希一遍。.mts/.m2ts 是摄像机（AVCHD）的，不是 TypeScript。
+VIDEO_EXT = {
+    ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".insv", ".360", ".lrv", ".3gp",
+    ".mpeg", ".mpg", ".flv", ".wmv", ".mts", ".m2ts",
+}
 SKIP_EXT = {".xmp", ".aae", ".thm", ".lrv.tmp", ".db", ".ini", ".txt", ".json", ".xml"}
 
 
