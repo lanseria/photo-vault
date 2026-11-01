@@ -186,6 +186,39 @@ def ingest_file(
         raise ValueError("library 只能是 gallery 或 material")
     stats.scanned += 1
     ext = path.suffix.lower()
+    key = stem_key or (path.parent, path.stem)
+
+    # 来源信息：origin_rel 用相对路径，换盘/换挂载点后仍然稳定。
+    origin_abs = origin[0] if origin else str(path)
+    if origin:
+        origin_rel = origin[1]
+    elif root is not None:
+        try:
+            origin_rel = path.relative_to(root).as_posix()
+        except ValueError:
+            origin_rel = path.name
+    else:
+        origin_rel = path.name
+
+    # ---- 0. 快速去重（重扫 / 断点续跑）
+    #  同一来源相对路径 + 同样大小 → 这份内容之前就入过库了，不必再把整份文件读一遍。
+    #  2 TB 的重扫从“读两小时”变成“查几千次库、几秒”，断点续跑也不会从头算哈希。
+    #  网页上传（origin 不为空）不走这条路：不同设备可能有同名同大小的照片。
+    if origin is None and root is not None:
+        quick = conn.execute(
+            """select f.asset_id, a.kind, a.library
+                 from files f join assets a on a.id = f.asset_id
+                where f.role in ('original', 'live_motion')
+                  and f.origin_rel = %s and f.bytes = %s
+                limit 1""",
+            (origin_rel, path.stat().st_size),
+        ).fetchone()
+        if quick:
+            stats.duplicate += 1
+            if (quick["kind"] in ("photo", "raw") and quick["library"] == library
+                    and ext in LIVE_MOTION_EXT):
+                stem_map.setdefault(key, str(quick["asset_id"]))
+            return
 
     # ---- 1. 取哈希
     #   copy: 边拷到 landing 边算（一次读、一次写）
@@ -200,8 +233,6 @@ def ingest_file(
     else:
         tmp = hashutil.new_landing_path(cfg.landing_root)
         sha, nbytes = hashutil.copy_and_hash(path, tmp)
-
-    key = stem_key or (path.parent, path.stem)
 
     # ---- 2. 精确去重
     #  查任意 role：Live Photo 的 MOV 是以 live_motion 入库的，只看 role='original'
@@ -267,15 +298,6 @@ def ingest_file(
         stats.bytes += nbytes
 
     try:
-        origin_abs = origin[0] if origin else str(path)
-        if origin:
-            origin_rel = origin[1]
-        else:
-            try:
-                origin_rel = path.relative_to(root).as_posix() if root else path.name
-            except ValueError:
-                origin_rel = path.name
-
         # ---- 5. Live Photo 配对（同目录同文件名，HEIC + MOV）
         kind = p.kind
         role = "original"

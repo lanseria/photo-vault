@@ -1,0 +1,241 @@
+/** 后端 /api 的响应类型。字段名与 vault/web.py 的 JSON 逐一对应。 */
+
+export type AssetKind = 'photo' | 'video' | 'live_photo' | 'raw' | (string & {})
+export type Library = 'gallery' | 'material'
+
+export interface Asset {
+  id: string
+  kind: AssetKind
+  library: Library
+  sha: string
+  favorite: boolean
+  /** 本地拍摄时间（不带时区），如 2024-05-01T18:22:31 */
+  taken: string | null
+  tz_source?: string | null
+  model: string
+  /** devices.id；null = EXIF 里没有机型，未识别 */
+  device_id?: number | null
+  device_unknown?: boolean
+  device_kind?: string | null
+  /** EXIF 里的原始机型号，用于设备管理页对照 */
+  device_raw?: string
+  width: number | null
+  height: number | null
+  duration_ms: number | null
+  bytes: number
+  has_thumb: boolean
+  origin: string
+  tags: string[]
+  deleted?: boolean
+  /** 剪辑箱里的序号 */
+  ord?: number
+}
+
+export interface AssetPage {
+  total: number
+  items: Asset[]
+}
+
+export interface Stats {
+  count: number
+  gallery: number
+  material: number
+  material_bytes: number
+  material_duration_ms: number
+  favorites: number
+  trash: number
+  persons: number
+  cinema_titles: number
+  cinema_episodes: number
+  device_count: number
+  unknown_device: number
+  media_root: string
+  media_host_root: string
+  bytes: number
+  first: string | null
+  last: string | null
+  devices: { model: string; count: number }[]
+}
+
+export interface Person {
+  id: string
+  name: string
+  cover: string | null
+  n_faces: number
+  n_assets: number
+}
+
+export interface PersonList {
+  persons: Person[]
+  unassigned_faces: number
+}
+
+export interface TagCount {
+  id: number | string
+  name: string
+  count: number
+}
+
+export interface BinSummary {
+  id: string
+  name: string
+  note: string | null
+  items: number
+  dur_ms: number
+  bytes: number
+}
+
+export interface BinList {
+  bins: BinSummary[]
+}
+
+export interface BinItems {
+  items: Asset[]
+}
+
+export interface Face {
+  id: string
+  person_id: string | null
+  person: string
+  bbox: [number, number, number, number]
+  det_score: number
+}
+
+export interface VideoFrame {
+  ord: number
+  t_ms: number
+  width: number | null
+  height: number | null
+  diff: number | null
+  caption: string | null
+  labels: unknown
+  ocr: string | null
+  url: string | null
+}
+
+export interface VideoSummary {
+  n_frames: number
+  caption: string | null
+  labels: unknown
+  ocr: string | null
+  model: string | null
+  ms: number | null
+}
+
+export interface VideoInfo {
+  summary: VideoSummary | null
+  frames: VideoFrame[]
+}
+
+export interface CinemaTitleSummary {
+  id: string
+  kind: 'movie' | 'series'
+  title: string
+  year: number | null
+  overview: string | null
+  poster: string | null
+  n_episodes: number
+  n_seasons: number
+  first_season: number
+  duration_ms: number
+  bytes: number
+  subtitles: number
+  updated_at: string | null
+}
+
+export interface CinemaSubtitle {
+  id: string
+  lang: string | null
+  label: string
+  format: string | null
+  forced: boolean
+}
+
+export interface CinemaEpisode {
+  id: string
+  season: number
+  episode: number
+  name: string | null
+  bytes: number
+  duration_ms: number | null
+  width: number | null
+  height: number | null
+  codec: string | null
+  subtitles: CinemaSubtitle[]
+  missing: boolean
+  host_path: string
+}
+
+export interface CinemaTitleDetail {
+  id: string
+  kind: 'movie' | 'series'
+  title: string
+  year: number | null
+  overview: string | null
+  poster: string | null
+  can_rescan: boolean
+  seasons: { season: number; episodes: CinemaEpisode[] }[]
+  n_episodes: number
+  duration_ms: number
+  bytes: number
+}
+
+export interface CinemaList {
+  titles: CinemaTitleSummary[]
+  media_root: string
+  media_host_root: string
+}
+
+export interface ImportRun {
+  id: string
+  state: 'running' | 'done' | 'error'
+  kind: string
+  path: string
+  host_path: string
+  total: number
+  done: number
+  scanned: number
+  imported: number
+  updated: number
+  failed: number
+  titles: number
+  subtitles: number
+  current: string
+  errors: { path: string; error: string }[]
+  error: string | null
+}
+
+export interface UploadResult {
+  status: 'imported' | 'duplicate'
+  asset?: Asset
+  queued?: number
+}
+
+export interface DeliverResult {
+  items: number
+  bytes: number
+  missing: number
+  host_dir: string
+  opened: boolean
+}
+
+export interface Device {
+  id: number
+  /** 展示名：label > model_canonical > model_raw > 未识别设备 */
+  name: string
+  label: string
+  make: string
+  model_raw: string
+  model_canonical: string
+  kind: string
+  n_assets: number
+  n_gallery: number
+  first: string | null
+  last: string | null
+}
+
+export interface DeviceList {
+  devices: Device[]
+  /** 没有 device_id 的资产数 */
+  unknown: number
+}

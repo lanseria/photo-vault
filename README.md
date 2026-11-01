@@ -55,6 +55,50 @@ Docker 构建同样走 uv：`uv sync --frozen --no-dev`，保证容器里的版�
 
 ---
 
+## 前端（Vue 3 + Vite + UnoCSS）
+
+界面是独立的单页应用，代码在 `frontend/`，构建产物落在 `vault/static/`，由 FastAPI 直接托管
+（`COPY vault ./vault` 时一起进镜像）。仓库里带了一份构建产物，所以只改后端时不用装 Node。
+
+```bash
+cd frontend
+pnpm install
+pnpm build          # 产出到 ../vault/static，刷新页面即可
+pnpm dev            # 开发模式：5173，/api 与图片请求代理到 8081
+```
+
+`pnpm dev` 默认代理 `http://127.0.0.1:8081`（`.env` 里的 `APP_PORT`）；
+换端口用 `VITE_BACKEND=http://127.0.0.1:9000 pnpm dev`。
+
+### 路由
+
+| 路径 | 内容 |
+|---|---|
+| `/gallery` · `/material` | 图库 / 素材库 |
+| `/gallery/favorites` · `/material/favorites` | 喜欢（按库） |
+| `/gallery/tags/:tag` · `/material/tags/:tag` | 标签（按库） |
+| `/people` · `/people/:id` | 人物墙 / 某个人的照片 |
+| `/bin` | 剪辑箱 |
+| `/cinema` · `/cinema/:id` | 影视库 / 条目详情 |
+| `/trash` | 最近删除 |
+
+旧链接（`/?view=fav`、`/?view=tag&tag=…`、`/?view=person&person=<id>`、`/?view=cinema&title=<id>`）
+由路由重定向到上面的新路径。
+
+### 刷新为什么不会跳回顶部
+
+1. **视图和筛选都在 URL 里**（`?q=` `?kind=` `?dur=` `?px=`），刷新即还原；
+2. **滚动位置按「路径 + 查询」存 sessionStorage**，刷新、前进后退都会恢复；
+3. **分页会补齐**：恢复滚动之前先按需往后拉几页 —— 否则页面还没那么高，`scrollTo` 会被浏览器夹到底；
+4. **灯箱也是 URL**（`?photo=<id>`），刷新后还停在同一张；全屏浮层期间暂停记录滚动，
+   避免 `overflow:hidden` 把位置归零后覆盖记忆。
+
+图层顺序：`AppHeader` / `NavChips` / `FilterBar` 是外壳，`RouterView` 是内容，
+灯箱、标签面板、上传面板、toast 是全局浮层。资产的所有写操作集中在
+`src/composables/useAssetActions.ts`，组件只负责「点了哪个按钮」。
+
+---
+
 ## 把现有相册"快捷"整理进来（家庭机场景）
 
 关键判断：**已有 2TB 数据在机器上，不要搬。** 拷贝 2TB 要双倍空间 + 双倍时间，
@@ -146,7 +190,7 @@ uv run --group ml python -m ml.enqueue
 
 # ② 启动 worker：消费队列打标（--task tags 只打标，--task faces 只跑人脸）
 $env:DATABASE_URL='postgresql://vault:vault@localhost:5433/vault'
-$env:VAULT_ROOT='E:\photo\vault'
+$env:VAULT_ROOT='D:\photo\vault'
 uv run --group ml python -m ml.worker --task tags
 ```
 
@@ -358,7 +402,7 @@ uv run --group ml python -m ml.vlm --reaggregate --min-share 0.75
 1. **浏览器拖不出文件。** 从网页拖一个 `<img>`／`<a>` 到剪映，外部程序只能拿到
    `text/uri-list`，拿不到真实路径——Chromium 出于安全不会把本地路径交出去。
    所以"拖拽"这个动作必须有原生进程参与，纯 Web 做不到。
-2. **容器摸不到桌面。** app 跑在 Docker 里（`/host` → `E:\photo`），进程在 Linux 命名空间，
+2. **容器摸不到桌面。** app 跑在 Docker 里（`/host` → `D:\photo`），进程在 Linux 命名空间，
    `explorer.exe`、剪贴板、OLE 拖拽全都调不到。
 
 于是分工：**容器只负责数据**（查库、建硬链接、写清单），**宿主机桥负责桌面**
@@ -416,7 +460,7 @@ uv run photo-vault bridge --uninstall  # 撤销
 
 ```bash
 $env:DATABASE_URL='postgresql://vault:vault@localhost:5433/vault'
-$env:VAULT_ROOT='E:\photo\vault'; $env:DERIVED_ROOT='E:\photo\derived'
+$env:VAULT_ROOT='D:\photo\vault'; $env:DERIVED_ROOT='D:\photo\derived'
 uv run photo-vault serve --port 8081
 ```
 
@@ -484,6 +528,46 @@ uv run photo-vault ingest D:\素材 --mode copy --library material
 
 批量搬旧相册还是用 CLI 更快：上传受 Docker bind mount 限制，一次几千个文件不如
 `vault ingest` 直接读盘。
+
+---
+
+## 拍摄设备：识别、命名、手工归类
+
+`devices` 是设备字典：入库时从 EXIF 取 `Make` / `Model`，同一个机型只建一行。
+
+**展示名**按优先级取：用户起的名字（`devices.label`）→ 归一化型号 → EXIF 原始型号；
+三者都没有就是「未识别设备」。
+
+**为什么会有未识别**：截图、微信 / QQ 保存的图、剪辑软件导出的视频，EXIF 里根本没有机型。
+这些资产的 `device_id` 为空，网页上是这样体现的：
+
+- 照片列表右上角有一个橙色 **?** 角标（悬停显示「未识别拍摄设备」）；
+- 「设备」页顶部显示未识别的总数；
+- 打开照片后，点标题下面的设备名，可以从**已有设备**里挑一台归过去，或者清回未识别；
+- 「导入」面板里，这一批如果有没认出设备的，底部会出现
+  「N 项没识别出拍摄设备 → 选择设备」，选一次整批归过去，不用一张张改；
+- 列表里也能批量改：点右上角「选择」→ 勾选照片 → 底部「设备」→ 选一台设备
+  （或「未识别设备」清除原归类）。几十张截图一次归位，比逐张点开快得多。
+
+**改名**：导航里的「📷 设备」→ 每行「重命名」。名字是展示用的标签，留空即恢复默认；
+EXIF 原值仍保留在下面一行，方便对照是哪台机器。改完列表和灯箱会立刻跟着变
+（列表接口返回的是 `label > canonical > raw` 算好的展示名）。
+
+**新建设备**：「设备」页「＋ 新建设备」，填个名字、选类型（手机 / 相机 / 无人机 /
+运动相机 / 其他）。用于 EXIF 认不出来、但你又确实想分类的机器，比如「大疆 Action 2」。
+建出来是一台空设备，之后在照片详情或导入面板里把照片归过来。导入 / 灯箱的设备选择器
+底部也有「新建设备…」，建完直接选中，少一步跳转。
+
+**合并**：同一种机器常因为 EXIF 写法不同被建成两行（`iPhone 12 Pro Max` 和
+`Apple iPhone 12 Pro Max`、`iPhone13,4` 和 `iPhone 12 Pro Max`）。在源设备那行点「合并」，
+选目标设备即可：照片全部改挂过去，源设备删除。
+
+> 合并只改 `assets.device_id`，照片的 EXIF 原值一个字都不动。所以以后再次导入
+> 同型号的机器时，`ingest` 会按 EXIF 把源设备重新建出来 —— 想彻底归并，要靠改名
+> 让展示名一致，或者接受它再出现一次。这是「不改原数据」的代价，也是有意的取舍。
+
+这套逻辑只加了一列（`011_devices.sql` 的 `devices.label`），老数据不用迁移：
+`label` 为空时展示行为与之前完全一致。
 
 ---
 
@@ -595,10 +679,12 @@ docker compose exec app python -m vault.cli cinema-list
 | 素材库 | ✅ | `assets.library`（gallery/material）：移进移出、AI 结果复用、收藏/标签/人物跟随当前库 |
 | 素材库 AI 入队 | ✅ | 选中 →「AI 识别」：按需排 RAM++ / 人脸 / 视频关键帧，已排过的跳过 |
 | 网页导入 | ✅ | 拖拽 / 选文件直传：边收边算 sha256、重复跳过、`os.replace` 入库（只写一次盘）；图库 / 素材库可选 |
+| 拍摄设备 | ✅ | EXIF 机型 → `devices`；未识别的手工归类（列表批量 / 导入整批 / 灯箱单张）；可新建自定义设备、改名、合并 |
 | 影视库 | ✅ | `cinema_titles` / `cinema_episodes` / `cinema_subtitles`：只登记路径，不搬文件、不跑 AI |
 | 影视命名识别 | ✅ | SxxEyy / 1x02 / 第01集 / Season 目录 / 番剧式；电影名去发布组噪声 |
 | 影视字幕 | ✅ | 同目录 sidecar 自动识别（srt/ass/ssa/vtt），播放时转 WebVTT |
 | 影视播放 | ✅ | MP4/WebM 直接播（Range）；MKV/AVI 交给系统播放器（宿主模式或桌面桥） |
+| Web 前端 | ✅ | Vue 3 + Vite + UnoCSS + vue-router：URL 即状态，刷新保持视图与滚动位置 |
 | 剪辑搜索轴 | ✅ | 类型／时长／最小短边；`q` 同时搜标签、视频描述、OCR、人物名 |
 | 剪辑箱 | ✅ | `bins`/`bin_items`，跨多次搜索累积、可排序，顺序即出稿编号 |
 | 出稿到剪辑软件 | ✅ | 硬链接物化成 `derived/cuts/<箱名>/` + `cutlist.csv`，命名带拍摄时间 |
@@ -633,7 +719,8 @@ photo-vault/
 │   ├── 007_video.sql       # video_frames / video_summaries
 │   ├── 008_clip.sql        # bins / bin_items + trigram 搜索索引
 │   ├── 009_library.sql     # assets.library：相册 gallery / 素材库 material
-│   └── 010_cinema.sql      # 影视条目 / 剧集 / 字幕（只存路径，不搬文件）
+│   ├── 010_cinema.sql      # 影视条目 / 剧集 / 字幕（只存路径，不搬文件）
+│   └── 011_devices.sql     # devices.label：用户起的设备名（"我的手机"）
 ├── vault/
 │   ├── config.py           # 环境配置 + 宿主机/容器路径映射
 │   ├── db.py
@@ -644,7 +731,14 @@ photo-vault/
 │   ├── cinema.py           # 影视：命名解析 / ffprobe / 字幕识别 / 导入（不跑 AI）
 │   ├── cli.py              # initdb | audit | ingest | stats | doctor | reconcile | serve | bridge | cinema-import | cinema-list
 │   ├── bridge.py           # 宿主机桥：explorer 定位 / 剪贴板 / 系统播放器（Windows）
-│   └── web.py              # FastAPI + 单页 UI（图库 / 素材库 / 人物 / 标签 / 剪辑箱 / 影视）
+│   └── web.py              # FastAPI API + 静态托管（SPA 兜底到 vault/static/index.html）
+├── vault/static/           # 前端构建产物（cd frontend && pnpm build 生成，随仓库提交）
+├── frontend/               # Vue 3 + Vite + UnoCSS 单页应用
+│   ├── src/router/         # 路由表 + 旧深链重定向
+│   ├── src/stores/         # Pinia：feed / selection / bin / upload / cinema / people / tags / toast
+│   ├── src/composables/    # 滚动位置恢复、资产写操作、灯箱 query
+│   ├── src/components/     # 顶栏、导航 chips、网格卡片、灯箱、标签面板、上传面板、播放器
+│   └── src/views/          # FeedView / PeopleView / BinView / DevicesView / CinemaView / CinemaTitleView
 ├── ml/
 │   ├── faces.py            # SCRFD 检测 + ArcFace 识别 + 模型下载
 │   ├── cluster.py          # 人脸聚类 → 匿名人物
