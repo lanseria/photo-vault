@@ -565,6 +565,66 @@ uv run photo-vault ingest D:\素材 --mode copy --library material
 
 ---
 
+## iOS App 接入（相册同步）
+
+iOS 端只做"把 PhotoKit 里的照片/视频推过来"，服务端已经比网页导入需要的东西都齐了。
+下面这些都是实测过的行为（HEIC + MOV 真上传过一遍）。
+
+**地址**：`http://<电脑局域网 IP>:7878`（本机是 `192.168.31.115`；ZeroTier 地址
+`10.144.14.190` 可从外网连）。容器监听 `0.0.0.0`，Windows 防火墙只需放行 Docker
+Desktop 的后台规则（已允许 专用/公用）。
+
+**跨域**：已开 CORS（默认 `*`，`CORS_ORIGINS=a,b` 可收紧）。原生 App 用 URLSession
+本来就不受 CORS 限制；这条是给 WKWebView / 浏览器调试页用的。预检 `OPTIONS` 返回
+200，`Range` 响应也带 `Access-Control-Expose-Headers: Content-Length, Content-Range,
+Accept-Ranges`。
+
+**ATS**：iOS 默认禁止明文 HTTP。连局域网 IP 时要在 Info.plist 里加
+`NSAppTransportSecurity → NSAllowsLocalNetworking = true`（或对具体域名开例外）；
+只连 `localhost` 才不需要。真要跨公网，建议反代加 HTTPS，别开
+`NSAllowsArbitraryLoads`。
+
+**鉴权**：服务本身没有登录（家庭内网定位）。要放到公网必须自己套一层反代 + Basic
+Auth 或 VPN，否则任何能连到端口的人都能读删照片。
+
+### 同步 Live Photo
+
+PhotoKit 的 Live Photo 是一个 `PHAsset` 两个资源：`.photo`（HEIC/JPG 静帧）和
+`.pairedVideo`（MOV）。按下面两条规则推，服务端会合成**一条** `live_photo` 资产：
+
+1. 两个文件用**同一个 `batch`**（建议每张照片一个 UUID），文件名用同一个 stem：
+   `IMG_0001.HEIC` + `IMG_0001.MOV`（扩展名不区分大小写）；
+2. **先传静帧，再传动态**。静帧建资产并记住 `(batch, stem)`；动态到达时挂成
+   `role='live_motion'`，资产 kind 变成 `live_photo`。顺序反了会变成一条独立视频。
+   服务端重启或超过 6 小时会丢掉这个映射，重传静帧即可（内容重复会直接返回
+   `duplicate`，不会产生副本）。
+
+```http
+POST /api/upload?name=IMG_0001.HEIC&library=gallery&batch=<uuid>   body = 文件字节
+POST /api/upload?name=IMG_0001.MOV&library=gallery&batch=<uuid>    body = 文件字节
+→ {"status":"imported","asset":{...kind:"live_photo"...},"queued":N}
+```
+
+响应里第二条的 `asset` 就是合成后的资产。重传返回 `"status":"duplicate"`。
+
+### 同步需要的接口
+
+| 用途 | 接口 |
+|---|---|
+| 推文件 | `POST /api/upload?name=&library=&batch=`，body 是原始字节（`URLSession.uploadTask(with:fromFile:)`） |
+| 列照片 | `GET /api/assets?limit=100&offset=0&library=gallery`（`kind=video,live_photo` 可筛） |
+| 单张详情 | `GET /api/assets/{id}` |
+| 缩略图 | `GET /thumbs/{sha}.webp`（512px） |
+| 预览图 | `GET /preview/{id}`（HEIC/RAW 会转 JPEG，≤2048px） |
+| 原件 | `GET /file/{id}`（原始字节，支持 `Range`） |
+| 实况视频 | `GET /file/{id}?role=live_motion`（支持 `Range`，`AVPlayer` 直接播） |
+| 删除 | `POST /api/assets/{id}/trash` → `DELETE /api/assets/{id}`（进回收站再彻底删） |
+
+分页是 `offset` 游标，按拍摄时间倒序；`total` 在响应里。上传是流式写盘，没有文件
+大小上限，GB 级视频也能推（用文件 URL 上传，别把整个文件读进内存）。
+
+---
+
 ## 拍摄设备：识别、命名、手工归类
 
 `devices` 是设备字典：入库时从 EXIF 取 `Make` / `Model`，同一个机型只建一行。
@@ -749,6 +809,7 @@ docker compose exec app python -m vault.cli cinema-list
 | 影视字幕 | ✅ | 同目录 sidecar 自动识别（srt/ass/ssa/vtt），播放时转 WebVTT |
 | 影视播放 | ✅ | MP4/WebM 直接播（Range）；MKV/AVI 交给系统播放器（宿主模式或桌面桥） |
 | Web 前端 | ✅ | Vue 3 + Vite + UnoCSS + vue-router：URL 即状态，刷新保持视图与滚动位置 |
+| 外部客户端 / iOS | ✅ | CORS（`CORS_ORIGINS` 可收紧）；`/api/upload` 流式收文件，同批 HEIC+MOV 自动配成 Live Photo；`/file/{id}?role=live_motion` 支持 Range |
 | 剪辑搜索轴 | ✅ | 类型／时长／最小短边；`q` 同时搜标签、视频描述、OCR、人物名 |
 | 剪辑箱 | ✅ | `bins`/`bin_items`，跨多次搜索累积、可排序，顺序即出稿编号 |
 | 出稿到剪辑软件 | ✅ | 硬链接物化成 `derived/cuts/<箱名>/` + `cutlist.csv`，命名带拍摄时间 |

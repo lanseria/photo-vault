@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from psycopg.rows import dict_row
@@ -52,6 +53,20 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Photo Vault", lifespan=lifespan)
+
+# 跨域：原生 iOS / Android 客户端走 URLSession，本身不受 CORS 限制；
+# 但 WKWebView 里加载的页面、浏览器里的调试页、以及将来的网页客户端会受。
+# 本服务没有 Cookie / 鉴权，默认放开来源即可；要收紧就设 CORS_ORIGINS（逗号分隔）。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",")
+                   if o.strip()],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    # iOS 端要读这些头才能做分片/断点续传和进度显示
+    expose_headers=["Content-Length", "Content-Range", "Accept-Ranges"],
+)
 
 
 def q(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
