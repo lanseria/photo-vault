@@ -567,6 +567,21 @@ uv run photo-vault ingest D:\素材 --mode copy --library material
 
 ## iOS App 接入（相册同步）
 
+客户端 App 在 [`ios/`](ios/README.md)：原生 SwiftUI，iOS 17+，零第三方依赖，
+只做一件事——**把 iPhone 相册里的原件推到这台机器**。构建、签名、排错看
+[`ios/README.md`](ios/README.md)。
+
+- **同步**：PhotoKit 原件导出（HEIC/JPG/MOV…）、Live Photo 自动配对（同 `batch`、同 stem、
+  先静帧后动态）、增量账本 + 服务器索引对账（重装 App 也不会把几万张重传一遍）、
+  断点与失败重试、后台上传（URLSession 后台会话 + BGProcessingTask）、实时进度/速度/ETA。
+- **地址**：默认 `http://bmc_desktop:7878`；单段主机名解析不到时自动再试 `bmc_desktop.local`，
+  也可以直接填局域网 IP。
+- **图库**：App 内可以只读浏览服务器上的相册（缩略图网格 + 详情），不做删除/改标签——
+  手机端误触的代价太高。
+- **权限**：`NSAllowsLocalNetworking` 放行局域网明文 HTTP（不是 `NSAllowsArbitraryLoads`）；
+  `NSLocalNetworkUsageDescription` 解释本地网络用途；相册支持「完整/部分」授权。
+
+下面这些是服务端侧的行为约定（都是实测过的），App 直接按这套实现：
 iOS 端只做"把 PhotoKit 里的照片/视频推过来"，服务端已经比网页导入需要的东西都齐了。
 下面这些都是实测过的行为（HEIC + MOV 真上传过一遍）。
 
@@ -600,18 +615,26 @@ PhotoKit 的 Live Photo 是一个 `PHAsset` 两个资源：`.photo`（HEIC/JPG �
    `duplicate`，不会产生副本）。
 
 ```http
-POST /api/upload?name=IMG_0001.HEIC&library=gallery&batch=<uuid>   body = 文件字节
-POST /api/upload?name=IMG_0001.MOV&library=gallery&batch=<uuid>    body = 文件字节
+POST /api/upload?name=IMG_0001.HEIC&library=gallery&batch=<uuid>&taken=<ISO8601>   body = 文件字节
+POST /api/upload?name=IMG_0001.MOV&library=gallery&batch=<uuid>&taken=<ISO8601>    body = 文件字节
 → {"status":"imported","asset":{...kind:"live_photo"...},"queued":N}
 ```
 
 响应里第二条的 `asset` 就是合成后的资产。重传返回 `"status":"duplicate"`。
 
+### taken：客户端已知的拍摄时间（可选）
+
+`taken` 是文件在源头的时间：iOS 同步传 `PHAsset.creationDate`（ISO8601 UTC，
+如 `2024-09-01T01:30:00Z`），网页上传传 `File.lastModified`（毫秒时间戳）。
+只在**文件本身完全没有内嵌时间**时才用它（聊天保存图、截图重存、无 EXIF 渲染图），
+避免这些资产的日期退化成"上传那一刻"；文件有 EXIF / 容器时间时以内嵌为准，
+`taken` 被忽略。缺省或解析不了都不报错，走原来的探测逻辑。
+
 ### 同步需要的接口
 
 | 用途 | 接口 |
 |---|---|
-| 推文件 | `POST /api/upload?name=&library=&batch=`，body 是原始字节（`URLSession.uploadTask(with:fromFile:)`） |
+| 推文件 | `POST /api/upload?name=&library=&batch=&taken=`，body 是原始字节（`URLSession.uploadTask(with:fromFile:)`） |
 | 列照片 | `GET /api/assets?limit=100&offset=0&library=gallery`（`kind=video,live_photo` 可筛） |
 | 单张详情 | `GET /api/assets/{id}` |
 | 缩略图 | `GET /thumbs/{sha}.webp`（512px） |
@@ -858,6 +881,12 @@ photo-vault/
 │   ├── bridge.py           # 宿主机桥：explorer 定位 / 剪贴板 / 系统播放器（Windows）
 │   └── web.py              # FastAPI API + 静态托管（SPA 兜底到 vault/static/index.html）
 ├── vault/static/           # 前端构建产物（cd frontend && pnpm build 生成，随仓库提交）
+├── ios/                    # 原生 iOS App（SwiftUI，只做相册同步；见 ios/README.md）
+│   ├── project.yml         # XcodeGen 工程描述（仓库不提交 .xcodeproj）
+│   ├── PhotoVaultSync/     # App / Core（纯逻辑）/ Sync（同步内核）/ UI
+│   ├── Tests/              # Core 与 Sync 纯逻辑单测
+│   ├── tools/              # 工程重生成（带锁）、App 图标、模拟器测试素材
+│   └── qa/                 # 端到端验证报告与截图
 ├── frontend/               # Vue 3 + Vite + UnoCSS 单页应用
 │   ├── src/router/         # 路由表 + 旧深链重定向
 │   ├── src/stores/         # Pinia：feed / selection / bin / upload / cinema / people / tags / toast

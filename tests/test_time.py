@@ -78,6 +78,27 @@ p = Probe()
 local, off, src, utc = resolve_time(p, DEFAULT)
 check("no time info", (local, src, utc), (None, "unknown", None))
 
+# 5) 客户端拍摄时间提示（iOS 同步 / 网页上传，文件没有内嵌时间时的兜底）
+from datetime import timedelta  # noqa: E402
+
+from vault.meta import resolve_taken_hint  # noqa: E402
+
+hint = datetime(2024, 9, 1, 9, 30, 0, tzinfo=timezone(timedelta(hours=8)))
+check("hint aware +0800 → wall clock kept",
+      resolve_taken_hint(hint, DEFAULT), (datetime(2024, 9, 1, 9, 30, 0), 480))
+
+hint_z = datetime(2024, 9, 1, 1, 30, 0, tzinfo=timezone.utc)
+check("hint utc → wall clock via default tz",
+      resolve_taken_hint(hint_z, DEFAULT), (datetime(2024, 9, 1, 9, 30, 0), 480))
+
+check("hint naive → wall clock + default tz",
+      resolve_taken_hint(datetime(2024, 9, 1, 9, 30, 0), DEFAULT),
+      (datetime(2024, 9, 1, 9, 30, 0), 480))
+
+check("hint microseconds trimmed",
+      resolve_taken_hint(datetime(2024, 9, 1, 9, 30, 0, 123456, tzinfo=timezone.utc), DEFAULT)[0],
+      datetime(2024, 9, 1, 17, 30, 0))
+
 print()
 if failures:
     print(f"FAILED {len(failures)} case(s):")

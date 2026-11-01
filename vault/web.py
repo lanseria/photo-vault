@@ -10,7 +10,7 @@ import threading
 import time
 import uuid as uuidlib
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -1262,8 +1262,34 @@ select a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_source,
 """
 
 
+def _parse_taken(raw: str) -> datetime | None:
+    """
+    客户端上传时给的拍摄时间 → aware datetime（UTC）。解析不了返回 None（不当错误）。
+
+    两种来源：
+      * iOS 同步：ISO8601 UTC，如 2024-09-01T01:30:00Z（PHAsset.creationDate）；
+      * 网页上传：File.lastModified 的毫秒时间戳，如 1725154200000。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if text.isdigit():                       # 浏览器毫秒时间戳
+        try:
+            return datetime.fromtimestamp(int(text[:13]) / 1000, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError):
+            return None
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def _upload_finish(tmp: Path, safe: str, library: str, batch: str,
-                   sha: str, nbytes: int) -> dict[str, Any]:
+                   sha: str, nbytes: int,
+                   taken_hint: datetime | None = None) -> dict[str, Any]:
     """把 landing 里的上传文件入库（在 threadpool 里跑：ffprobe/PIL 都是阻塞的）。"""
     assert pool is not None
     stats = ingest_mod.Stats()
@@ -1277,6 +1303,7 @@ def _upload_finish(tmp: Path, safe: str, library: str, batch: str,
             sha_hint=(sha, nbytes),
             origin=(f"web://{safe}", safe),
             stem_key=key,
+            taken_hint=taken_hint,
         )
         row = conn.execute(
             "select asset_id from files where sha256=%s "
@@ -1309,11 +1336,17 @@ async def api_upload(
     name: str = Query(..., min_length=1),
     library: str = Query("gallery"),
     batch: str = Query(""),
+    taken: str = Query(""),
 ) -> JSONResponse:
     """原始字节流上传（不用 multipart：GB 级视频不落容器临时盘，直接写 landing）。
 
     POST /api/upload?name=IMG_0001.HEIC&library=gallery&batch=<一次拖拽的 uuid>
+                &taken=<可选：ISO8601 UTC 或毫秒时间戳>
     body = 文件内容。返回 {status: imported|duplicate, asset, queued}。
+
+    taken 是客户端已知的拍摄时间（iOS 相册 PHAsset.creationDate / 网页
+    File.lastModified）。文件自身没有内嵌时间时（聊天保存图、截图重存）用它，
+    避免这些资产的日期退化成"上传那一刻"；文件有 EXIF 时以内嵌时间为准，taken 被忽略。
     """
     if library not in ("gallery", "material"):
         raise HTTPException(400, "library 只能是 gallery 或 material")
@@ -1323,6 +1356,7 @@ async def api_upload(
                             + (Path(safe).suffix.lower() or "(无扩展名)"))
     if batch and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", batch):
         batch = ""                       # 异常批次号当没有，不影响入库
+    taken_hint = _parse_taken(taken)     # 解析不了就当没有，走原来的探测逻辑
 
     cfg.ensure_dirs()
     suffix = Path(safe).suffix.lower()
@@ -1340,7 +1374,7 @@ async def api_upload(
         if total == 0:
             raise HTTPException(400, "空文件")
         result = await run_in_threadpool(
-            _upload_finish, tmp, safe, library, batch, h.hexdigest(), total
+            _upload_finish, tmp, safe, library, batch, h.hexdigest(), total, taken_hint
         )
         return JSONResponse(result)
     except HTTPException:

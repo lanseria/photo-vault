@@ -1,0 +1,20 @@
+# XcodeGen 生成物
+PhotoVaultSync.xcodeproj/
+Support/Info.plist
+.build/
+DerivedData/
+
+# Xcode 本地状态
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+
+# QA 产物：截图/HTTP 证据里含用户真实照片等大体积本地文件，不进仓库；
+# 只提交 ios/qa/REPORT.md 与 ios/qa/tools/ 源码。
+qa/screenshots/
+qa/evidence/
+qa/seed/
+qa/.build/
+
+# 本地测试素材
+TestMedia/

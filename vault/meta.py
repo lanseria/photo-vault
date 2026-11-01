@@ -329,6 +329,30 @@ def resolve_time(
     return p.taken_local, default_offset_min, "default", None
 
 
+def resolve_taken_hint(
+    hint: datetime, default_offset_min: int
+) -> tuple[datetime, int] | None:
+    """
+    客户端（iOS 相册 / 网页上传）给的拍摄时间 → (本地墙钟, 偏移分钟)。
+
+    文件本身没有任何时间信息（聊天保存图、截图重存、无 EXIF 渲染图）时，
+    这比"landing 临时文件的 mtime = 上传那一刻"准确得多。
+      * 带非零偏移（如 +08:00）→ 客户端知道拍摄时区，直接用；
+      * 只有 UTC 瞬时（…Z / 毫秒时间戳）→ 跟视频 creation_time …Z 的处理一致，
+        瞬时可信、墙钟未知，按默认时区还原；
+      * naive → 只能当墙钟用，时区按默认偏移算。
+    """
+    offset = int((hint.utcoffset() or timedelta()).total_seconds() // 60)
+    if hint.tzinfo is None:
+        # naive：只能当墙钟，时区按默认算（astimezone 会错拿服务器本地时区换算）
+        return hint.replace(microsecond=0), default_offset_min
+    if offset == 0:
+        offset = default_offset_min
+    local = (hint.astimezone(timezone.utc).replace(tzinfo=None)
+             + timedelta(minutes=offset)).replace(microsecond=0)
+    return local, offset
+
+
 def to_utc(local: datetime | None, offset_min: int) -> datetime | None:
     if local is None:
         return None

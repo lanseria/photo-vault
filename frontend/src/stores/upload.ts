@@ -25,6 +25,9 @@ const LIB_KEY = 'vault.upLib'
 function uploadOne(job: UploadJob, batch: string, library: Library, onProgress: (pct: number) => void) {
   return new Promise<UploadResult>((resolve, reject) => {
     const search = new URLSearchParams({ name: job.name, library, batch })
+    // 拍摄时间（毫秒时间戳）：文件没有 EXIF 时（聊天保存图、截图重存）服务端用它，
+    // 日期才不会退化成"上传那一刻"；有内嵌时间时服务端会忽略它。
+    if (job.file.lastModified) search.set('taken', String(job.file.lastModified))
     const xhr = new XMLHttpRequest()
     xhr.open('POST', `/api/upload?${search.toString()}`)
     xhr.upload.onprogress = ev => {

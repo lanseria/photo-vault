@@ -268,6 +268,7 @@ def ingest_file(
     sha_hint: tuple[str, int] | None = None,
     origin: tuple[str, str] | None = None,
     stem_key: tuple[Path, str] | None = None,
+    taken_hint: datetime | None = None,
 ) -> None:
     """
     mode:
@@ -284,6 +285,12 @@ def ingest_file(
       网页上传专用。sha_hint 是收流时已经算好的哈希（避免再读一遍 GB 级视频）；
       origin 覆盖 files 里的来源信息（上传没有磁盘路径）；stem_key 让同一批上传里
       的 HEIC+MOV 也能配成 Live Photo（临时文件名是随机的，不能拿它当 stem）。
+
+    taken_hint:
+      客户端给的拍摄时间（iOS 同步：PHAsset.creationDate；网页：File.lastModified）。
+      只在文件本身完全没有时间信息时才用它（聊天保存图、截图重存、无 EXIF 渲染图），
+      否则一律信文件内嵌的 EXIF/容器时间 —— 不覆盖原件证据。
+      没有它时才退回 mtime，而 mtime 是上传那一刻，这就是"日期全变成现在"的根源。
     """
     if library not in ("gallery", "material"):
         raise ValueError("library 只能是 gallery 或 material")
@@ -361,6 +368,12 @@ def ingest_file(
     # ---- 3. 探测元数据 + 时区
     p = meta.probe(path)
     local, offset, tz_source, utc_known = meta.resolve_time(p, cfg.default_tz_offset_min)
+    if local is None and taken_hint is not None:
+        hinted = meta.resolve_taken_hint(taken_hint, cfg.default_tz_offset_min)
+        if hinted is not None:
+            local, offset = hinted
+            tz_source = "client"
+            utc_known = meta.to_utc(local, offset)
     if local is None:
         # 完全没有时间信息（截图导出、聊天保存图）→ 退回文件 mtime，至少能排序
         local = datetime.fromtimestamp(path.stat().st_mtime).replace(microsecond=0)
