@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, nextTick, ref } from 'vue'
 import { api, errorText, type AssetQuery } from '@/api'
 import type { Asset, Library } from '@/types'
-import { dateHeader, dateKey } from '@/utils/date'
+import { groupHeader, groupKey, type GroupMode } from '@/utils/date'
 import { useToastStore } from './toast'
 
 export type FeedKind = 'gallery' | 'material' | 'favorites' | 'tag' | 'person' | 'trash'
@@ -19,9 +19,13 @@ export interface FeedConfig {
   dur?: string
   /** '' | '1080' | '2160' */
   px?: string
+  /** 时间轴分组粒度，默认按日 */
+  group?: GroupMode
+  /** 设备筛选：'' = 全部，'unknown' = 未识别，其余为设备 id 字符串 */
+  device?: string
 }
 
-export interface DaySection {
+export interface TimeSection {
   key: string
   label: string
   items: Asset[]
@@ -36,7 +40,7 @@ const PAGE_SIZE = 120
  * 这样刷新、前进后退、分享链接都是同一套逻辑，不需要在 JS 里另存一份。
  */
 export const useFeedStore = defineStore('feed', () => {
-  const config = ref<FeedConfig>({ kind: 'gallery', library: 'gallery', q: '', kindFilter: '', dur: '', px: '' })
+  const config = ref<FeedConfig>({ kind: 'gallery', library: 'gallery', q: '', kindFilter: '', dur: '', px: '', group: 'day' })
   const items = ref<Asset[]>([])
   const total = ref(0)
   const loading = ref(false)
@@ -48,13 +52,15 @@ export const useFeedStore = defineStore('feed', () => {
   let seq = 0
   let pending = 0
 
-  const sections = computed<DaySection[]>(() => {
-    const out: DaySection[] = []
-    let current: DaySection | null = null
+  /** 按当前分组粒度（日 / 周 / 月 / 年）把已加载的资产切段；顺序即渲染顺序 */
+  const sections = computed<TimeSection[]>(() => {
+    const mode = config.value.group ?? 'day'
+    const out: TimeSection[] = []
+    let current: TimeSection | null = null
     for (const asset of items.value) {
-      const key = dateKey(asset)
+      const key = groupKey(asset, mode)
       if (!current || current.key !== key) {
-        current = { key, label: dateHeader(key), items: [] }
+        current = { key, label: groupHeader(key, mode), items: [] }
         out.push(current)
       }
       current.items.push(asset)
@@ -85,6 +91,7 @@ export const useFeedStore = defineStore('feed', () => {
       if (max) params.max_sec = Number(max)
     }
     if (cfg.px) params.min_px = Number(cfg.px)
+    if (cfg.device) params.device = cfg.device
     return params
   }
 

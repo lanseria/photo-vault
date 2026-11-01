@@ -18,6 +18,9 @@ const emit = defineEmits<{ activate: []; remove: [] }>()
 const thumb = computed(() => `/thumbs/${props.asset.sha}.webp`)
 const duration = computed(() => (props.asset.kind === 'video' ? fmtDur(props.asset.duration_ms) : ''))
 const placeholder = computed(() => (props.asset.kind === 'video' ? '▶' : 'RAW'))
+
+/** 未识别设备的问号角标：素材库是剪辑素材，不提示这个（图库/其它视图照旧） */
+const showUnknown = computed(() => props.asset.device_unknown === true && props.asset.library !== 'material')
 </script>
 
 <template>
@@ -42,6 +45,12 @@ const placeholder = computed(() => (props.asset.kind === 'video' ? '▶' : 'RAW'
 
     <span v-if="duration" class="card-badge bottom-[5px] left-1.5">▶ {{ duration }}</span>
     <span
+      v-if="asset.raw_ext"
+      class="card-badge bottom-[5px] left-1.5 rounded-[5px] bg-[rgba(60,60,67,.6)] px-[5px] py-px text-[10px] tracking-[.5px] [text-shadow:none]"
+      title="RAW+JPEG：剪辑出稿时两个文件一起给"
+      >RAW+JPEG</span
+    >
+    <span
       v-if="asset.kind === 'live_photo'"
       class="card-badge left-1.5 top-[5px] rounded-[5px] bg-[rgba(60,60,67,.55)] px-[5px] py-px text-[10px] tracking-[.5px] [text-shadow:none]"
       >LIVE</span
@@ -54,9 +63,9 @@ const placeholder = computed(() => (props.asset.kind === 'video' ? '▶' : 'RAW'
       class="absolute bottom-[5px] right-1.5 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,.8)]"
     />
 
-    <!-- 没识别出拍摄设备的照片：右上角一个小问号，点了进灯箱可以手工归到某台设备 -->
+    <!-- 没识别出拍摄设备的照片：右上角一个小问号，点了进灯箱可以手工归到某台设备（素材库不提示） -->
     <span
-      v-if="asset.device_unknown"
+      v-if="showUnknown"
       class="absolute top-1.5 z-[2] flex h-[18px] w-[18px] items-center justify-center rounded-full bg-warn text-[11px] font-bold text-black shadow-[0_1px_3px_rgba(0,0,0,.6)]"
       :class="removable ? 'right-[30px]' : 'right-1.5'"
       title="未识别拍摄设备"

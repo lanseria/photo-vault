@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { errorText } from '@/api'
 import type { Device } from '@/types'
 import { useChromeStore } from '@/stores/chrome'
@@ -11,6 +12,7 @@ import { useToastStore } from '@/stores/toast'
 import DeviceCreateDialog from '@/components/DeviceCreateDialog.vue'
 import DevicePicker from '@/components/DevicePicker.vue'
 
+const router = useRouter()
 const devices = useDevicesStore()
 const chrome = useChromeStore()
 const dialog = useDialogStore()
@@ -30,6 +32,11 @@ const KIND: Record<string, { icon: string; label: string }> = {
 }
 
 const kindOf = (kind: string) => KIND[kind] ?? KIND.other
+
+/** 跳到图库并按这台设备过滤（'unknown' = 未识别） */
+function viewPhotos(device: number | 'unknown') {
+  void router.push(device === 'unknown' ? '/gallery?device=unknown' : `/gallery?device=${device}`)
+}
 
 function syncChrome() {
   chrome.set({
@@ -112,6 +119,8 @@ async function onCreated(device: Device) {
       <div class="flex items-baseline gap-2">
         <span class="text-[13.5px] font-medium text-warn">未识别拍摄设备</span>
         <span class="text-[12.5px] text-mut">{{ devices.unknown }} 张</span>
+        <span class="flex-1" />
+        <button class="shrink-0 text-[12.5px] text-acc" @click="viewPhotos('unknown')">看照片 →</button>
       </div>
       <p class="m-0 mt-1 text-[12px] leading-relaxed text-mut">
         导入面板里可以给整批选设备；单张照片打开后点设备名也能改。
@@ -160,6 +169,9 @@ async function onCreated(device: Device) {
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-2">
+          <button class="px-0.5 py-1.5 text-[12.5px] text-acc" @click="viewPhotos(device.id)">
+            看照片
+          </button>
           <button class="px-0.5 py-1.5 text-[12.5px] text-acc" @click="rename(device)">
             重命名
           </button>

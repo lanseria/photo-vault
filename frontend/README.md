@@ -2,7 +2,7 @@
 
 ```bash
 pnpm install
-pnpm dev      # http://127.0.0.1:5173，/api 与图片代理到 8081
+pnpm dev      # http://127.0.0.1:5173，/api 与图片代理到 7878
 pnpm build    # 产出 ../vault/static（FastAPI 直接托管）
 pnpm typecheck
 ```
@@ -32,3 +32,4 @@ src/
 - **样式用 UnoCSS 原子类**：主题色在 `uno.config.ts` 的 `theme.colors`（`bg` / `panel` / `fg` / `mut` / `acc` / `heart`）。
   只有照片网格、粘性日期头、动效这类拿原子类表达不划算的规则才写在 `styles/main.css`。
 - 不要直接改 `vault/static/`：那是 `pnpm build` 的产物。
+

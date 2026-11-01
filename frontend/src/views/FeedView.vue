@@ -10,9 +10,11 @@ import { useChromeStore } from '@/stores/chrome'
 import { usePeopleStore } from '@/stores/people'
 import { useAssetActions } from '@/composables/useAssetActions'
 import { usePhotoQuery } from '@/composables/usePhotoQuery'
+import { isGroupMode } from '@/utils/date'
 import { readScroll, restoreScroll, scrollKey } from '@/composables/scrollMemory'
 import PhotoCell from '@/components/PhotoCell.vue'
 import PhotoLightbox from '@/components/PhotoLightbox.vue'
+import TimelineScrubber from '@/components/TimelineScrubber.vue'
 
 const route = useRoute()
 const feed = useFeedStore()
@@ -36,6 +38,8 @@ const cfg = computed<FeedConfig>(() => ({
   kindFilter: typeof route.query.kind === 'string' ? route.query.kind : '',
   dur: typeof route.query.dur === 'string' ? route.query.dur : '',
   px: typeof route.query.px === 'string' ? route.query.px : '',
+  group: isGroupMode(route.query.group) ? route.query.group : 'day',
+  device: typeof route.query.device === 'string' ? route.query.device : '',
 }))
 
 const cfgKey = computed(() => JSON.stringify(cfg.value))
@@ -49,6 +53,8 @@ const emptyText = computed(() => {
   if (kind === 'favorites') return '还没有喜欢的照片。'
   if (kind === 'tag') return `「${cfg.value.tag}」下还没有照片。`
   if (kind === 'person') return '这个人名下还没有照片。'
+  if (cfg.value.device === 'unknown') return '没有未识别设备的照片。'
+  if (cfg.value.device) return '这台设备名下还没有照片。\n设备名可以在「📷 设备」页里重命名。'
   if (cfg.value.q) return `没有匹配「${cfg.value.q}」的内容。`
   return '图库是空的。点右上角「导入」，或者把图片 / 视频拖进窗口。'
 })
@@ -98,7 +104,11 @@ watch(
 )
 watch(
   () => feed.items.length,
-  () => selection.setScope(feed.items.map(a => a.id)),
+  () => {
+    selection.setScope(feed.items.map(a => a.id))
+    // 每页加载完都补一次：页面还不到一屏就继续拉下一页
+    fillViewport()
+  },
 )
 
 /* ---------------- 灯箱 ---------------- */
@@ -182,6 +192,26 @@ async function onPurge() {
 
 /* ---------------- 无限滚动 ---------------- */
 
+/**
+ * 兜底：分页太靠后时，哨兵可能一进页面就落在 rootMargin 里，
+ * IntersectionObserver 没有"从外面进入"的状态变化，就永远不会触发 loadMore。
+ * 按年/月分组时页面矮，最容易撞上：只加载一屏就再也滚不出新内容。
+ * 所以每页合并后都主动检查一次，哨兵还在附近就继续拉，直到填满视口。
+ * 用 rAF 等这一帧的 DOM 真的长出来再量，否则量到的是旧高度、会多拉一页。
+ */
+let fillFrame = 0
+
+function fillViewport() {
+  if (fillFrame) return
+  fillFrame = requestAnimationFrame(() => {
+    fillFrame = 0
+    const el = sentinel.value
+    if (!el || feed.loading || feed.done || feed.error) return
+    if (el.getBoundingClientRect().top > window.innerHeight + 900) return
+    void feed.loadMore()
+  })
+}
+
 onMounted(() => {
   observer = new IntersectionObserver(
     entries => {
@@ -191,6 +221,8 @@ onMounted(() => {
   )
   if (sentinel.value) observer.observe(sentinel.value)
   document.addEventListener('keydown', onKeydown)
+  window.addEventListener('resize', fillViewport)
+  fillViewport()
 })
 
 onBeforeUnmount(() => {
@@ -198,6 +230,8 @@ onBeforeUnmount(() => {
   observer = null
   selection.stop()
   document.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('resize', fillViewport)
+  if (fillFrame) cancelAnimationFrame(fillFrame)
 })
 
 function onKeydown(event: KeyboardEvent) {
@@ -211,6 +245,8 @@ function onKeydown(event: KeyboardEvent) {
       v-for="section in feed.sections"
       :key="section.key"
       class="pb-1"
+      data-section
+      :data-key="section.key"
     >
       <h2 class="day-head">{{ section.label }}</h2>
       <div class="photo-grid">
@@ -245,6 +281,8 @@ function onKeydown(event: KeyboardEvent) {
     </div>
 
     <div ref="sentinel" class="h-2" />
+
+    <TimelineScrubber />
 
     <PhotoLightbox
       v-if="currentAsset"

@@ -83,6 +83,8 @@ export interface AssetQuery {
   min_sec?: number
   max_sec?: number
   min_px?: number
+  /** 设备 id 字符串，或 'unknown' = 未识别设备 */
+  device?: string
 }
 
 export const api = {

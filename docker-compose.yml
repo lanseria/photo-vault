@@ -52,7 +52,7 @@ services:
       DEFAULT_TZ_OFFSET_MIN: ${DEFAULT_TZ_OFFSET_MIN:-480}
       TZ: ${TZ:-Asia/Shanghai}
     ports:
-      - "${APP_PORT:-8080}:8080"
+      - "${APP_PORT:-7878}:7878"
     volumes:
       # 唯一的业务挂载点。必须是本地固定盘：
       # SMB/UNC 网络盘无法可靠 bind-mount（WSL2 限制），且不支持硬链接。

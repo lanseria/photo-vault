@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,10 @@ from .config import Config
 # 合并会把视频错算成图片的 live_motion。
 LIVE_STILL_EXT = {".heic", ".heif", ".jpg", ".jpeg"}
 LIVE_MOTION_EXT = {".mov", ".mp4"}
+
+# RAW+JPEG：同一张照片拍了两种文件。列表只展示一条，出稿时两个一起给。
+JPEG_EXT = {".jpg", ".jpeg"}
+PAIR_WINDOW_SECONDS = 300      # 同目录同名之外，再要求拍摄时间接近（防同名重拍）
 
 
 @dataclass
@@ -150,6 +155,104 @@ def _live_pair_ok(conn, asset_id: str, video: Path) -> bool:
     return bool(row) and (row["ext"] or "").lower() in LIVE_STILL_EXT
 
 
+def _stem_key(path: str) -> str:
+    """目录 + 文件名（不含扩展名），小写。RAW/JPEG 配对和重扫都靠它。"""
+    return re.sub(r"\.[^.]+$", "", path or "").lower()
+
+
+def _pair_sibling(conn, asset_id: str, ext: str, origin_rel: str,
+                  library: str, local: datetime | None) -> dict | None:
+    """找这张照片的另一半：RAW 来了找同名的 JPEG，JPEG 来了找同名的 RAW。
+
+    条件：同库、同目录同文件名（忽略大小写）、拍摄时间相差 ≤ 5 分钟，
+    并且对方还没有挂过 RAW（避免重复配对）。返回对方资产里那条 original 文件。
+    """
+    if ext in meta.RAW_EXT:
+        wanted = list(JPEG_EXT)
+    elif ext in JPEG_EXT:
+        wanted = list(meta.RAW_EXT)
+    else:
+        return None
+    key = _stem_key(origin_rel)
+    if not key:
+        return None
+    rows = conn.execute(
+        """
+        select f.asset_id, f.id file_id, f.ext, a.taken_at_local, a.device_id
+          from files f join assets a on a.id = f.asset_id
+         where f.role = 'original'
+           and lower(f.ext) = any(%s)
+           and lower(regexp_replace(f.origin_rel, '\\.[^.]+$', '')) = %s
+           and a.library = %s and not a.is_deleted
+           and f.asset_id <> %s
+           and not exists (select 1 from files x
+                            where x.asset_id = f.asset_id and x.role = 'raw')
+        """,
+        (wanted, key, library, asset_id),
+    ).fetchall()
+    best = None
+    for row in rows:
+        other = row["taken_at_local"]
+        if local is not None and other is not None:
+            delta = abs((other - local).total_seconds())
+            if delta > PAIR_WINDOW_SECONDS:
+                continue
+        else:
+            delta = float("inf")      # 有一边没时间：同目录同名仍然认
+        if best is None or delta < best[0]:
+            best = (delta, row)
+    return best[1] if best else None
+
+
+def merge_pair(conn, raw_id: str, jpeg_id: str) -> None:
+    """把两条资产合成一条：RAW 以 role='raw' 挂到 JPEG 那条上，另一条删掉。
+
+    保留 JPEG 是因为缩略图、预览、宽高都按它算；RAW 只在出稿时使用。
+    标签、喜欢、设备、剪辑箱都并到保留的那条，不丢用户数据。
+    """
+    conn.execute(
+        "update files set asset_id=%s, role='raw' where asset_id=%s and role='original'",
+        (jpeg_id, raw_id),
+    )
+    conn.execute(
+        """insert into asset_tags (asset_id, tag_id)
+           select %s, tag_id from asset_tags where asset_id=%s
+           on conflict do nothing""",
+        (jpeg_id, raw_id),
+    )
+    conn.execute(
+        """insert into bin_items (bin_id, asset_id, ord)
+           select bin_id, %s, ord from bin_items where asset_id=%s
+           on conflict do nothing""",
+        (jpeg_id, raw_id),
+    )
+    conn.execute(
+        """update assets set
+             favorite = favorite or (select favorite from assets where id=%s),
+             device_id = coalesce(device_id, (select device_id from assets where id=%s)),
+             width = coalesce(width, (select width from assets where id=%s)),
+             height = coalesce(height, (select height from assets where id=%s))
+           where id=%s""",
+        (raw_id, raw_id, raw_id, raw_id, jpeg_id),
+    )
+    conn.execute("delete from assets where id=%s", (raw_id,))
+
+
+def pair_with_sibling(conn, asset_id: str, ext: str, origin_rel: str,
+                      library: str, local: datetime | None) -> str | None:
+    """刚入库的文件如果有配对的另一半，就地合并成一个资产。
+
+    返回活下来的资产 id（被合并掉的那条已删除），没配上返回 None。
+    """
+    sibling = _pair_sibling(conn, asset_id, ext, origin_rel, library, local)
+    if not sibling:
+        return None
+    keep = sibling["asset_id"] if ext in meta.RAW_EXT else asset_id
+    drop = asset_id if ext in meta.RAW_EXT else sibling["asset_id"]
+    merge_pair(conn, drop, keep)
+    return keep
+
+
 def ingest_file(
     conn,
     cfg: Config,
@@ -208,7 +311,7 @@ def ingest_file(
         quick = conn.execute(
             """select f.asset_id, a.kind, a.library
                  from files f join assets a on a.id = f.asset_id
-                where f.role in ('original', 'live_motion')
+                where f.role in ('original', 'live_motion', 'raw')
                   and f.origin_rel = %s and f.bytes = %s
                 limit 1""",
             (origin_rel, path.stat().st_size),
@@ -302,6 +405,7 @@ def ingest_file(
         kind = p.kind
         role = "original"
         asset_id = stem_map.get(key)
+        paired_id = None
 
         with conn.transaction():
             if asset_id and p.kind == "video" and _live_pair_ok(conn, asset_id, path):
@@ -350,12 +454,21 @@ def ingest_file(
                  p.width, p.height, hashutil.average_hash(final),
                  source_id, origin_abs, used_mode, origin_abs, origin_rel),
             )
+
+            # ---- 5b. RAW+JPEG 配对：同目录同名的另一半已经在库里就合成一条
+            paired_id = None
+            if role == "original" and (ext in meta.RAW_EXT or ext in JPEG_EXT):
+                paired_id = pair_with_sibling(conn, asset_id, ext, origin_rel,
+                                              library, local)
+                if paired_id:
+                    asset_id = paired_id
+                    stem_map[key] = paired_id
     except Exception:
         final.unlink(missing_ok=True)
         raise
 
-    # ---- 6. 衍生图
-    if role == "original":
+    # ---- 6. 衍生图（配对进 JPEG 的那张 RAW 不用再出缩略图）
+    if role == "original" and not (paired_id and ext in meta.RAW_EXT):
         dst = _thumb_path(cfg, sha)
         ok = _video_poster(final, dst) if p.kind == "video" else meta.make_thumb(
             final, dst, cfg.thumb_size, cfg.thumb_quality

@@ -25,6 +25,9 @@ export interface Asset {
   bytes: number
   has_thumb: boolean
   origin: string
+  /** RAW+JPEG：有 RAW 原件时非空（如 ".dng"），出稿会连同 JPEG 一起给 */
+  raw_ext: string
+  raw_bytes: number
   tags: string[]
   deleted?: boolean
   /** 剪辑箱里的序号 */

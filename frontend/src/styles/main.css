@@ -95,9 +95,10 @@ input[type='search']::-webkit-search-cancel-button {
   }
 }
 
+/* 日期头条：吸附在顶部固定区（--dock-h 由 App.vue 的 ResizeObserver 同步）下面 */
 .day-head {
   position: sticky;
-  top: 0;
+  top: var(--dock-h, 0px);
   z-index: 5;
   margin: 0;
   padding: 14px 14px 8px;
@@ -152,4 +153,83 @@ input[type='search']::-webkit-search-cancel-button {
 
 .no-scrollbar::-webkit-scrollbar {
   display: none;
+}
+
+/* ---- 右侧时间轴（快速定位条）---- */
+
+.tl-rail {
+  position: fixed;
+  top: calc(var(--dock-h, 130px) + 6px);
+  bottom: 90px;
+  right: 8px;
+  width: 20px;
+  z-index: 30;
+  touch-action: none;
+  cursor: pointer;
+}
+
+.tl-tick {
+  position: absolute;
+  right: 5px;
+  width: 9px;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 1px;
+  background: rgba(255, 255, 255, 0.3);
+  pointer-events: none;
+}
+
+.tl-tick-on {
+  background: rgba(255, 255, 255, 0.9);
+  width: 11px;
+}
+
+/* 分组少时（按年 / 按月）直接在刻度旁标出时间，点到哪滚到哪 */
+.tl-label {
+  position: absolute;
+  right: 18px;
+  transform: translateY(-50%);
+  max-width: 92px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 10.5px;
+  line-height: 1;
+  letter-spacing: 0.2px;
+  pointer-events: none;
+}
+
+.tl-label-on {
+  color: rgba(255, 255, 255, 0.95);
+  font-weight: 600;
+}
+
+.tl-thumb {
+  position: absolute;
+  right: 2px;
+  width: 15px;
+  height: 30px;
+  margin-top: -15px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+.tl-bubble {
+  position: fixed;
+  right: 40px;
+  z-index: 95;
+  transform: translateY(-50%);
+  padding: 5px 13px;
+  border-radius: 11px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(44, 44, 46, 0.97);
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.5);
 }

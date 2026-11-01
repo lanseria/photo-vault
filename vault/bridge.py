@@ -36,7 +36,7 @@ from pydantic import BaseModel
 
 app = FastAPI(title="Photo Vault Bridge")
 
-# 只放行本机页面：127.0.0.1 / localhost 的任意端口（8081=容器、8082=宿主模式…）
+# 只放行本机页面：127.0.0.1 / localhost 的任意端口（7878=容器、7879=宿主模式…）
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"^http://(127\.0\.0\.1|localhost)(:\d+)?$",
@@ -216,3 +216,4 @@ def run(host: str = "127.0.0.1", port: int = 8099) -> None:
 
 if __name__ == "__main__":
     run()
+

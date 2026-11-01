@@ -48,7 +48,7 @@ returning j.id, j.kind, j.payload
 """
 
 ASSET_SQL = """
-select a.id, a.kind, a.duration_ms, f.rel_path
+select a.id, a.kind, a.library, a.duration_ms, f.rel_path
 from assets a join files f on f.asset_id = a.id and f.role = 'original'
 where a.id = %s::uuid
 """
@@ -141,6 +141,10 @@ def faces_batch(conn, engine: FaceEngine, cfg, jobs: list[dict]) -> None:
         row = conn.execute(ASSET_SQL, (asset_id,)).fetchone()
         if not row:
             finish(conn, job["id"], False, "asset 或 original file 不存在")
+            continue
+        # 素材库不做人脸识别：历史队列里可能还有素材库的任务，直接收掉
+        if row["library"] != "gallery":
+            finish(conn, job["id"], True, None)
             continue
 
         source = "photo"

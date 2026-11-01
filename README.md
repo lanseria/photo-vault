@@ -19,7 +19,7 @@ docker compose up -d db
 docker compose run --rm app python -m vault.cli initdb
 docker compose run --rm app python -m vault.cli ingest /host/source --mode link
 docker compose up -d app
-# 打开 http://localhost:8080
+# 打开 http://localhost:7878
 ```
 
 自检：
@@ -64,10 +64,10 @@ Docker 构建同样走 uv：`uv sync --frozen --no-dev`，保证容器里的版�
 cd frontend
 pnpm install
 pnpm build          # 产出到 ../vault/static，刷新页面即可
-pnpm dev            # 开发模式：5173，/api 与图片请求代理到 8081
+pnpm dev            # 开发模式：5173，/api 与图片请求代理到 7878
 ```
 
-`pnpm dev` 默认代理 `http://127.0.0.1:8081`（`.env` 里的 `APP_PORT`）；
+`pnpm dev` 默认代理 `http://127.0.0.1:7878`（`.env` 里的 `APP_PORT`）；
 换端口用 `VITE_BACKEND=http://127.0.0.1:9000 pnpm dev`。
 
 ### 路由
@@ -93,9 +93,35 @@ pnpm dev            # 开发模式：5173，/api 与图片请求代理到 8081
 4. **灯箱也是 URL**（`?photo=<id>`），刷新后还停在同一张；全屏浮层期间暂停记录滚动，
    避免 `overflow:hidden` 把位置归零后覆盖记忆。
 
-图层顺序：`AppHeader` / `NavChips` / `FilterBar` 是外壳，`RouterView` 是内容，
-灯箱、标签面板、上传面板、toast 是全局浮层。资产的所有写操作集中在
-`src/composables/useAssetActions.ts`，组件只负责「点了哪个按钮」。
+### 顶部固定区
+
+标题、标签页、筛选器包在一个 `position: sticky` 的顶栏里（`App.vue` 的 dock），
+滚动时只有时间轴动；日期头条吸附在顶栏下沿（高度由 ResizeObserver 同步成 `--dock-h`）。
+顶栏毛玻璃 + 半透明黑，滚起来之后才显示 1px 分隔线。滚动容器仍是整个文档，
+所以滚动恢复、无限加载、浮层锁滚这些机制都不受影响。
+
+### 分组与时间轴
+
+- **分组粒度**：筛选条最右侧「分组 日 / 周 / 月 / 年」，状态在 URL（`?group=week` 等，
+  默认按日不带参数）。刷新、分享链接都保持同一分组；不同分组各自记忆滚动位置。
+  周 = 周一起算，标题显示日期范围（如 `2026年10月26日 – 11月1日`），跨年两端都带年份。
+- **右侧时间轴**（`TimelineScrubber.vue`）：有两个以上分组时，窗口右缘出现刻度轨道，
+  刻度位置与各分组在页面里的实际高度成比例（按日上千段时自动抽样到 ≤140 个刻度）。
+  分组不多（按年 / 按月）时，刻度旁直接标出年份 / 月份，当前所在时间段高亮；
+  按住拖动立即滚动到对应位置，同时弹出当前分组名（如「2026年9月」）；松手即停。
+  仅照片流页面（图库 / 素材库 / 喜欢 / 标签 / 人物 / 回收站）有，设备、影视等页面没有。
+- **无限滚动兜底**：分组后页面可能只有一屏（按年时尤其明显），哨兵一加载完就落在
+  `rootMargin` 里，`IntersectionObserver` 没有"进入"事件就不会再拉页。所以每页合并后
+  都用 rAF 量一次哨兵位置，还在视口附近就继续拉，直到页面真的能滚；拖动时间轴导致
+  页面变长时，拇指会重新贴住原来的比例。
+
+筛选栏从左到右：类型 / 时长 / 清晰度 / **设备（下拉）** / **标签（下拉）** / 分组。
+「标签」入口从导航栏挪到了这里，和「设备」并排；点开是标签列表（带数量），选一个进入
+`/<库>/tags/<名字>`，在标签视图里再点它就回库。
+
+图层顺序：`AppHeader` / `NavChips` / `FilterBar` 是外壳（吸附顶栏，z-40），
+`RouterView` 是内容（时间轴轨道 z-30），灯箱、标签面板、上传面板、toast 是全局浮层。
+资产的所有写操作集中在 `src/composables/useAssetActions.ts`，组件只负责「点了哪个按钮」。
 
 ---
 
@@ -204,6 +230,10 @@ uv run --group ml python -m ml.worker --task tags
 检测用 **SCRFD 10G**（`det_10g.onnx`，640×640 输入、5 个关键点），识别用 **ArcFace R50**
 （`w600k_r50.onnx`，112×112 输入、512 维向量）——就是 InsightFace 官方 buffalo_l 包里的
 两张图，直接喂 ONNX Runtime，**完全不用 TensorRT**。
+
+> **素材库不跑人脸**：`library='material'` 的资产不排 `faces` 任务、worker 见到会直接
+> 收掉；把照片移进素材库时，已有的脸（`faces` 行 + `derived/faces` 裁剪图）一并清掉。
+> 打标（RAM++）和视频摘要照常。所以「人物」页和人物检索里只有图库的人。
 
 > 为什么不 `pip install insightface`：它硬依赖 CPU 版 onnxruntime，和 onnxruntime-gpu 同装会
 > 往同一个 `onnxruntime/` 目录写两份文件，Python 版本和 CUDA DLL 随机对不上。本项目只需要
@@ -428,6 +458,10 @@ uv run --group ml python -m ml.vlm --reaggregate --min-share 0.75
 | `001_20200917_115712_IMG_5135.MP4` | **硬链接**指向 vault 原件：零额外空间、瞬时、是真文件（不是快捷方式） |
 | `cutlist.csv` | 序号／时长／分辨率／标签，Excel 直接开（UTF-8 BOM） |
 
+RAW+JPEG 的照片会出**两个文件**：`001_20200917_115712_DJI_0498.JPG` 和
+`001_20200917_115712_DJI_0498.DNG` —— 序号、拍摄时间、原名都一样，只有扩展名不同，
+剪映里仍是一组。`cutlist.csv` 里也是两行，RAW 那行分辨率为 `?x?`。
+
 命名是设计过的：`序号_拍摄时间_原名.ext`。剪映素材库默认按文件名排序，
 于是**排序 = 你在箱子里的顺序**，同一时段的素材天然挨着。重新出稿会重排并清掉旧文件
 （`stale_removed`），所以出稿目录是"每次覆盖"的幂等产物——但**剪映草稿记的是绝对路径，
@@ -461,7 +495,7 @@ uv run photo-vault bridge --uninstall  # 撤销
 ```bash
 $env:DATABASE_URL='postgresql://vault:vault@localhost:5433/vault'
 $env:VAULT_ROOT='D:\photo\vault'; $env:DERIVED_ROOT='D:\photo\derived'
-uv run photo-vault serve --port 8081
+uv run photo-vault serve --port 7878
 ```
 
 这种部署下 app 进程本身就在 Windows 上，出稿时后端直接 `ShellExecute` 开文件夹
@@ -512,7 +546,7 @@ uv run photo-vault ingest D:\素材 --mode copy --library material
 
 ## 网页导入：拖拽即入库
 
-日常新增的照片 / 视频不用再从盘里扫：打开 `http://localhost:8081`，点右上角
+日常新增的照片 / 视频不用再从盘里扫：打开 `http://localhost:7878`，点右上角
 「导入」，把文件（或整个文件夹）拖进窗口，选「图库 / 素材库」，剩下的它自己做。
 
 - 收流直接写 landing（与 vault 同一文件系统），**边收边算 sha256**；重复内容按
@@ -524,7 +558,7 @@ uv run photo-vault ingest D:\素材 --mode copy --library material
   文件返回「已在图库 / 素材库」，不产生副本。
 - 导入完成自动排进 `jobs`（打标 / 人脸 / 视频），ML worker 在跑就会接着处理。
 - 文件夹可以整个拖，会递归展开；`.xmp`、`.aae` 这类伴生文件自动忽略。
-- 深链 `http://localhost:8081/#upload` 直接打开导入面板。
+- 深链 `http://localhost:7878/#upload` 直接打开导入面板。
 
 批量搬旧相册还是用 CLI 更快：上传受 Docker bind mount 限制，一次几千个文件不如
 `vault ingest` 直接读盘。
@@ -544,6 +578,8 @@ uv run photo-vault ingest D:\素材 --mode copy --library material
 - 照片列表右上角有一个橙色 **?** 角标（悬停显示「未识别拍摄设备」）；
 - 「设备」页顶部显示未识别的总数；
 - 打开照片后，点标题下面的设备名，可以从**已有设备**里挑一台归过去，或者清回未识别；
+- **素材库不显示这个标记**：素材库是剪辑素材，不按拍摄设备提示归类；那里的灯箱也只留
+  中性的「📷 设备」入口，不再用警告色写「未识别设备」；
 - 「导入」面板里，这一批如果有没认出设备的，底部会出现
   「N 项没识别出拍摄设备 → 选择设备」，选一次整批归过去，不用一张张改；
 - 列表里也能批量改：点右上角「选择」→ 勾选照片 → 底部「设备」→ 选一台设备
@@ -568,6 +604,33 @@ EXIF 原值仍保留在下面一行，方便对照是哪台机器。改完列表
 
 这套逻辑只加了一列（`011_devices.sql` 的 `devices.label`），老数据不用迁移：
 `label` 为空时展示行为与之前完全一致。
+
+**按设备筛选**：筛选条上有「设备 ▾」下拉，列出全部设备（带照片数，多者在前）和
+「未识别设备」，状态在 URL（`?device=<id>`，`?device=unknown`，可与其他筛选叠加），
+刷新、分享都保持。设备页每行和未识别横幅上都有「看照片」直达对应筛选结果。
+
+---
+
+## RAW+JPEG：一张照片，两个文件
+
+相机同时写 JPG + RAW（.DNG/.CR2/.NEF/.ARW…）时，**库里只有一条资产**：
+
+- `files` 里是两行：JPEG 是 `role='original'`（缩略图、预览、宽高都以它为准），
+  RAW 是 `role='raw'`；
+- 列表里只出现一张，左下角标 **RAW+JPEG**；灯箱里同样只显示 JPEG，下面注明
+  `RAW+JPEG · 24 MB`；
+- **出稿时两个文件一起给**（同序号、同拍摄时间、同原名，扩展名不同），剪辑软件拿到的
+  仍是一对 RAW+JPEG；搜索 / 筛选 / 计数都按"一张"算。
+
+**配对规则**（`vault/ingest.py`）：同库、同目录、同文件名（忽略大小写）、拍摄时间相差
+≤ 5 分钟。两个文件先后导入也会自动配对：RAW 先到时先建一条，JPEG 到达后合并成一条
+（保留 JPEG 那条的 id）；反过来也一样。
+
+历史数据用 `photo-vault pair` 补：老版本把一对存成了两条资产，这条命令把它们合并
+（先加 `--dry-run` 看清单，确认后再去掉执行）。合并只改库记录：标签、喜欢、
+设备、剪辑箱都会并到保留的那条上，vault 里的物理文件一个不动。
+
+> 没有 JPEG 的纯 RAW 文件仍然是独立资产（`kind='raw'` 的图片），不在配对范围内。
 
 ---
 
@@ -677,9 +740,10 @@ docker compose exec app python -m vault.cli cinema-list
 | 视频打标 | ✅ | 关键帧（均匀候选 + 最远点采样）→ Qwen3-VL-4B 逐帧标注 → 票数聚合 |
 | 按原目录浏览 | ✅ | `origin_rel` + `/api/folders`，Web 上直接筛"原来放在哪个文件夹" |
 | 素材库 | ✅ | `assets.library`（gallery/material）：移进移出、AI 结果复用、收藏/标签/人物跟随当前库 |
-| 素材库 AI 入队 | ✅ | 选中 →「AI 识别」：按需排 RAM++ / 人脸 / 视频关键帧，已排过的跳过 |
+| 素材库 AI 入队 | ✅ | 选中 →「AI 识别」：按需排 RAM++ / 视频关键帧，已排过的跳过；**素材库不排人脸**（移入时清掉已有的脸） |
 | 网页导入 | ✅ | 拖拽 / 选文件直传：边收边算 sha256、重复跳过、`os.replace` 入库（只写一次盘）；图库 / 素材库可选 |
-| 拍摄设备 | ✅ | EXIF 机型 → `devices`；未识别的手工归类（列表批量 / 导入整批 / 灯箱单张）；可新建自定义设备、改名、合并 |
+| 拍摄设备 | ✅ | EXIF 机型 → `devices`；未识别的手工归类（列表批量 / 导入整批 / 灯箱单张）；可新建自定义设备、改名、合并；列表可按设备（含未识别）筛选 |
+| RAW+JPEG | ✅ | 同目录同名的 RAW+JPEG 合成一条资产（图表标 RAW+JPEG、灯箱只显示一张），出稿时两个文件一起给；`pair` 补历史数据 |
 | 影视库 | ✅ | `cinema_titles` / `cinema_episodes` / `cinema_subtitles`：只登记路径，不搬文件、不跑 AI |
 | 影视命名识别 | ✅ | SxxEyy / 1x02 / 第01集 / Season 目录 / 番剧式；电影名去发布组噪声 |
 | 影视字幕 | ✅ | 同目录 sidecar 自动识别（srt/ass/ssa/vtt），播放时转 WebVTT |
@@ -814,3 +878,4 @@ prompt 600 tok/s、生成 42 tok/s、单帧 2 秒 —— 比早先"3B 级 30–6
   关键帧也覆盖不到"一闪而过"的镜头。要按说话内容找视频，得再加 Whisper。
 - **关键帧是镜头级抽样**：一段 30 分钟的长录像只取 4 帧，适合"这段视频大概是什么"，
   不适合"精确找到第 17 分 32 秒的那句话"。
+

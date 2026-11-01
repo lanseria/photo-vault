@@ -139,10 +139,12 @@ def api_stats() -> JSONResponse:
              (select count(*) from assets where not is_deleted and library='material') material,
              (select count(*) from assets where favorite and not is_deleted) favs,
              (select count(*) from assets where is_deleted) trash,
-             (select count(*) from persons) people,
-             (select coalesce(sum(bytes),0) from files where role='original') b,
+             (select count(*) from persons p
+               where exists (select 1 from faces f where f.person_id = p.id)) people,
+             (select coalesce(sum(bytes),0) from files
+               where role in ('original', 'raw')) b,
              (select coalesce(sum(f.bytes),0) from files f join assets a on a.id=f.asset_id
-               where f.role='original' and a.library='material' and not a.is_deleted) mb,
+               where f.role = 'original' and a.library='material' and not a.is_deleted) mb,
              (select coalesce(sum(a.duration_ms),0) from assets a
                where a.library='material' and not a.is_deleted) mdur,
              (select count(*) from cinema_titles) cinema_titles,
@@ -198,6 +200,7 @@ def api_assets(
     min_sec: float | None = Query(None, ge=0),
     max_sec: float | None = Query(None, ge=0),
     min_px: int | None = Query(None, ge=0),
+    device: str | None = Query(None, description="设备 id，或 'unknown' 表示未识别"),
 ) -> JSONResponse:
     where = ["a.is_deleted" if trash else "not a.is_deleted"]
     params: list[Any] = []
@@ -257,12 +260,22 @@ def api_assets(
     if min_px:
         where.append("coalesce(least(a.width, a.height), 0) >= %s")
         params.append(int(min_px))
+    if device:
+        # 'unknown' = 还没识别出设备的照片；其余按设备 id 精确过滤
+        if device == "unknown":
+            where.append("a.device_id is null")
+        elif device.isdigit():
+            where.append("a.device_id = %s")
+            params.append(int(device))
+        else:
+            raise HTTPException(400, "device 只能是设备 id 或 'unknown'")
 
     clause = " and ".join(where)
     base = f"""
         from assets a
         left join devices d on d.id = a.device_id
         join files f on f.asset_id = a.id and f.role = 'original'
+        {_RAW_JOIN}
         where {clause}
     """
     order = ("coalesce(a.deleted_at, a.taken_at_utc) desc nulls last"
@@ -275,6 +288,7 @@ def api_assets(
                    d.model_canonical as device_canonical, d.kind as device_kind,
                    f.sha256, f.bytes, f.ext, f.origin_rel, f.storage_mode,
                    encode(f.sha256,'hex') sha,
+                   rf.ext raw_ext, rf.bytes raw_bytes,
                    coalesce((select json_agg(t3.name order by t3.name)
                              from asset_tags at3 join tags t3 on t3.id = at3.tag_id
                              where at3.asset_id = a.id), '[]'::json) tags
@@ -309,7 +323,11 @@ _ITEM_COLS = """a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_sour
                 a.device_id, d.label as device_label, d.model_raw as device_raw,
                 d.model_canonical as device_canonical, d.kind as device_kind,
                 f.sha256, f.bytes, f.ext, f.origin_rel,
-                encode(f.sha256,'hex') sha"""
+                encode(f.sha256,'hex') sha,
+                rf.ext raw_ext, rf.bytes raw_bytes"""
+
+# RAW+JPEG 是一张照片两个文件：JPEG 是 original，RAW 以 role='raw' 挂在同一个资产上。
+_RAW_JOIN = "left join files rf on rf.asset_id = a.id and rf.role = 'raw'"
 
 
 def _item_json(r: dict[str, Any], ord_: int | None = None, trash: bool = False) -> dict[str, Any]:
@@ -333,6 +351,9 @@ def _item_json(r: dict[str, Any], ord_: int | None = None, trash: bool = False) 
         "bytes": r["bytes"],
         "has_thumb": _thumb_ok(r["sha"]),
         "origin": r["origin_rel"],
+        # RAW+JPEG：raw_ext 非空表示这张照片还有一份 RAW 原件（出稿时一起给）
+        "raw_ext": (r.get("raw_ext") or ""),
+        "raw_bytes": int(r.get("raw_bytes") or 0),
         "tags": r["tags"],
         "deleted": trash,
     }
@@ -353,6 +374,7 @@ def api_asset(asset_id: str) -> JSONResponse:
             from assets a
             left join devices d on d.id = a.device_id
             join files f on f.asset_id = a.id and f.role = 'original'
+            {_RAW_JOIN}
             where a.id = %s::uuid""",
         (aid,),
     )
@@ -516,11 +538,12 @@ def api_bins() -> JSONResponse:
     rows = q("""select b.id, b.name, b.note, b.updated_at,
                        count(bi.asset_id) items,
                        coalesce(sum(a.duration_ms), 0) dur_ms,
-                       coalesce(sum(f.bytes), 0) bytes
+                       coalesce(sum(f.bytes), 0) + coalesce(sum(rf.bytes), 0) bytes
                 from bins b
                 left join bin_items bi on bi.bin_id = b.id
                 left join assets a on a.id = bi.asset_id
                 left join files f on f.asset_id = a.id and f.role = 'original'
+                left join files rf on rf.asset_id = a.id and rf.role = 'raw'
                 group by b.id
                 order by b.updated_at desc""")
     return JSONResponse({"bins": [{
@@ -570,6 +593,7 @@ def api_bin_items(bin_id: str) -> JSONResponse:
             join assets a on a.id = bi.asset_id
             left join devices d on d.id = a.device_id
             join files f on f.asset_id = a.id and f.role = 'original'
+            {_RAW_JOIN}
             where bi.bin_id = %s::uuid and not a.is_deleted
             order by bi.ord, bi.added_at""",
         (bid,),
@@ -675,14 +699,17 @@ def api_bin_deliver(bin_id: str, body: DeliverBody | None = None) -> JSONRespons
     rows = q(
         """select bi.ord, a.taken_at_local, a.duration_ms, a.width, a.height,
                   f.rel_path, f.ext, f.bytes, f.origin_rel,
+                  rf.rel_path raw_rel, rf.ext raw_ext, rf.bytes raw_bytes,
+                  rf.origin_rel raw_origin,
                   coalesce((select string_agg(t3.name, ' ' order by t3.name)
                             from asset_tags at3 join tags t3 on t3.id = at3.tag_id
                             where at3.asset_id = a.id), '') tags
            from bin_items bi
            join assets a on a.id = bi.asset_id
            join files f on f.asset_id = a.id and f.role = 'original'
+           {_RAW_JOIN}
            where bi.bin_id = %s::uuid and not a.is_deleted
-           order by bi.ord, bi.added_at""",
+           order by bi.ord, bi.added_at""".format(_RAW_JOIN=_RAW_JOIN),
         (bid,),
     )
     if not rows:
@@ -690,6 +717,20 @@ def api_bin_deliver(bin_id: str, body: DeliverBody | None = None) -> JSONRespons
 
     out = cfg.derived_root / "cuts" / (_safe_name(bin_row[0]["name"]) or "剪辑箱")
     out.mkdir(parents=True, exist_ok=True)
+
+    def write_one(src: Path, dst: Path) -> None:
+        if dst.exists():
+            try:
+                dst.unlink()
+            except OSError:
+                raise HTTPException(409, f"{dst.name} 被占用——剪映可能正打开着这个文件")
+        if mode == "link":
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
+        else:
+            shutil.copy2(src, dst)
 
     written: list[tuple[str, dict[str, Any]]] = []
     missing = 0
@@ -706,20 +747,27 @@ def api_bin_deliver(bin_id: str, body: DeliverBody | None = None) -> JSONRespons
         stem = _safe_name(orig.stem) if orig else ""
         ext = (orig.suffix if orig else "") or (r["ext"] or "")
         name = f"{i:03d}_{ts}" + (f"_{stem}" if stem else "") + ext
-        dst = out / name
-        if dst.exists():
-            try:
-                dst.unlink()
-            except OSError:
-                raise HTTPException(409, f"{name} 被占用——剪映可能正打开着这个文件")
-        if mode == "link":
-            try:
-                os.link(src, dst)
-            except OSError:
-                shutil.copy2(src, dst)
-        else:
-            shutil.copy2(src, dst)
+        write_one(src, out / name)
         written.append((name, r))
+
+        # RAW+JPEG：同一序号、同一 stem，把 RAW 也放出去 —— 剪辑时拿到的还是一对
+        if r["raw_rel"]:
+            raw_src = cfg.vault_root / r["raw_rel"]
+            if not raw_src.exists():
+                missing += 1
+                continue
+            raw_origin = Path(r["raw_origin"]) if r["raw_origin"] else orig
+            raw_stem = _safe_name(raw_origin.stem) if raw_origin else stem
+            raw_ext = (r["raw_ext"] or ".raw").lower()
+            raw_name = f"{i:03d}_{ts}" + (f"_{raw_stem}" if raw_stem else "") + raw_ext
+            write_one(raw_src, out / raw_name)
+            written.append((raw_name, {
+                **r,
+                "bytes": r["raw_bytes"],
+                "duration_ms": None,
+                "width": None,
+                "height": None,
+            }))
 
     # 清掉上一次出稿留下、这次已经不在箱子里的文件（只认我们自己的 001_ 命名）
     keep = {n for n, _ in written}
@@ -750,7 +798,8 @@ def api_bin_deliver(bin_id: str, body: DeliverBody | None = None) -> JSONRespons
     return JSONResponse({
         "dir": str(out),
         "host_dir": to_host_path(out),
-        "items": len(written),
+        "items": len(rows) - missing,
+        "files": len(written),
         "missing": missing,
         "stale_removed": stale,
         "bytes": sum(r["bytes"] or 0 for _, r in written),
@@ -827,13 +876,15 @@ class AnalyzeBody(BaseModel):
     ids: list[str]
 
 
-# 入队时跳过"已经排过 / 正在跑 / 已识别"的：重复点「AI 识别」不该把队列撑大
+# 入队时跳过"已经排过 / 正在跑 / 已识别"的：重复点「AI 识别」不该把队列撑大。
+# library 参数用来限定库：素材库不做人脸识别（faces 任务只认 gallery）。
 _ENQUEUE_JOB_SQL = """
 insert into jobs (kind, payload)
 select %s, jsonb_build_object('asset_id', a.id::text)
 from assets a
 where a.id = any(%s::uuid[]) and not a.is_deleted
   and (%s::text is null or a.kind = %s::text)
+  and (%s::text is null or a.library = %s::text)
   and not exists (
     select 1 from jobs j
     where j.kind = %s and j.state in ('pending', 'running', 'ok')
@@ -917,6 +968,16 @@ def api_batch(body: BatchBody) -> JSONResponse:
             n = conn.execute("update assets set library=%s "
                              "where id=any(%s::uuid[]) and not is_deleted",
                              (body.library, ids)).rowcount
+            if body.library == "material":
+                # 素材库不做人脸识别：已有的脸和排队中的脸任务一起清掉，
+                # 人物页 / 人像检索里就不会再出现素材库的东西。
+                conn.execute("delete from faces where asset_id = any(%s::uuid[])", (ids,))
+                conn.execute(
+                    """delete from jobs
+                        where kind = 'faces' and state in ('pending', 'running')
+                          and payload->>'asset_id' = any(%s::text[])""",
+                    ([str(i) for i in ids],),
+                )
         elif body.action in ("tag", "untag"):
             name = _clean_tag(body.tag or "")
             tid = _ensure_tag(conn, name)
@@ -950,8 +1011,10 @@ def api_analyze(body: AnalyzeBody) -> JSONResponse:
     assert pool is not None
     with pool.connection() as conn:
         for kind, asset_kind in (("analyze", None), ("faces", None), ("video", "video")):
+            # 素材库不做人脸识别；打标 / 视频摘要仍然排
+            lib = "gallery" if kind == "faces" else None
             cur = conn.execute(_ENQUEUE_JOB_SQL,
-                               (kind, ids, asset_kind, asset_kind, kind))
+                               (kind, ids, asset_kind, asset_kind, lib, lib, kind))
             by_kind[kind] = cur.rowcount
     total = sum(by_kind.values())
     return JSONResponse({"queued": total, "by_kind": by_kind})
@@ -1172,12 +1235,14 @@ select a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_source,
        d.model_canonical as device_canonical, d.kind as device_kind,
        f.bytes, f.ext, f.origin_rel,
        encode(f.sha256, 'hex') sha,
+       rf.ext raw_ext, rf.bytes raw_bytes,
        coalesce((select json_agg(t.name order by t.name)
                  from asset_tags at2 join tags t on t.id = at2.tag_id
                  where at2.asset_id = a.id), '[]'::json) tags
   from assets a
   left join devices d on d.id = a.device_id
   join files f on f.asset_id = a.id and f.role = 'original'
+  left join files rf on rf.asset_id = a.id and rf.role = 'raw'
  where a.id = %s
 """
 
@@ -1200,7 +1265,7 @@ def _upload_finish(tmp: Path, safe: str, library: str, batch: str,
         )
         row = conn.execute(
             "select asset_id from files where sha256=%s "
-            "and role in ('original', 'live_motion') limit 1",
+            "and role in ('original', 'live_motion', 'raw') limit 1",
             (bytes.fromhex(sha),),
         ).fetchone()
         if row is None:
@@ -1209,9 +1274,11 @@ def _upload_finish(tmp: Path, safe: str, library: str, batch: str,
         # 顺手排进 AI 队列：worker 在跑就会自动打标；没跑也只是 pending，不占资源
         queued = 0
         for kind, asset_kind in (("analyze", None), ("faces", None), ("video", "video")):
+            # 素材库不做人脸识别
+            lib = "gallery" if kind == "faces" else None
             queued += conn.execute(
                 _ENQUEUE_JOB_SQL, (kind, [str(row["asset_id"])], asset_kind,
-                                   asset_kind, kind)
+                                   asset_kind, lib, lib, kind)
             ).rowcount
     return {
         "status": "duplicate" if stats.duplicate else "imported",

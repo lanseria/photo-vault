@@ -79,6 +79,17 @@ async function onDrop(event: DragEvent) {
   else toast.show('没有可导入的图片或视频')
 }
 
+/* ---- 顶部固定区：标题 + 标签页 + 筛选器，滚动时只有时间轴动 ---- */
+
+const dock = ref<HTMLElement | null>(null)
+const scrolled = ref(false)
+
+let resizeObserver: ResizeObserver | null = null
+
+function syncScrolled() {
+  scrolled.value = window.scrollY > 4
+}
+
 onMounted(() => {
   void system.refreshStats()
   // 箱子是懒创建的：第一次打开页面就把默认剪辑箱准备好，点「剪辑箱」不用等
@@ -91,6 +102,18 @@ onMounted(() => {
   window.addEventListener('dragover', onDragOver)
   window.addEventListener('dragleave', onDragLeave)
   window.addEventListener('drop', onDrop)
+  window.addEventListener('scroll', syncScrolled, { passive: true })
+  syncScrolled()
+
+  // 日期头条要停在固定区下方，把它的高度同步成 CSS 变量（搜索框出现/消失也会跟着变）
+  const el = dock.value
+  if (el) {
+    const applyDockHeight = () =>
+      document.documentElement.style.setProperty('--dock-h', `${Math.round(el.offsetHeight)}px`)
+    applyDockHeight()
+    resizeObserver = new ResizeObserver(applyDockHeight)
+    resizeObserver.observe(el)
+  }
 
   if (location.hash === '#upload') upload.openDialog(dropLibrary.value)
 })
@@ -100,14 +123,24 @@ onBeforeUnmount(() => {
   window.removeEventListener('dragover', onDragOver)
   window.removeEventListener('dragleave', onDragLeave)
   window.removeEventListener('drop', onDrop)
+  window.removeEventListener('scroll', syncScrolled)
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  document.documentElement.style.removeProperty('--dock-h')
 })
 </script>
 
 <template>
   <div class="min-h-screen bg-bg">
-    <AppHeader />
-    <NavChips />
-    <FilterBar v-if="route.meta.filters" />
+    <div
+      ref="dock"
+      class="sticky top-0 z-40 border-b bg-[rgba(0,0,0,.82)] backdrop-blur-[14px]"
+      :class="scrolled ? 'border-line/70' : 'border-transparent'"
+    >
+      <AppHeader />
+      <NavChips />
+      <FilterBar v-if="route.meta.filters" />
+    </div>
     <RouterView />
     <SelectionBar v-if="selection.active && route.meta.selectable" />
     <TagSheet />

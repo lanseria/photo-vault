@@ -108,8 +108,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
     cfg = Config.load()
     with dbmod.connect(cfg.database_url) as conn:
         total = conn.execute(
-            "select count(*) c, coalesce(sum(f.bytes),0) b from assets a "
-            "left join files f on f.asset_id=a.id and f.role='original' "
+            "select count(distinct a.id) c, coalesce(sum(f.bytes),0) b from assets a "
+            "left join files f on f.asset_id=a.id and f.role in ('original', 'raw') "
             "where not a.is_deleted"
         ).fetchone()
         by_kind = conn.execute(
@@ -232,6 +232,28 @@ def cmd_prune_live_dups(args: argparse.Namespace) -> int:
             return 0
         cur = conn.execute(f"delete from assets a where {where}")
         print(f"已清理 {cur.rowcount} 条重复视频登记。")
+    return 0
+
+
+def cmd_pair(args: argparse.Namespace) -> int:
+    """把历史数据里"一张 RAW 一张 JPEG 各存一条"的资产合并成一条（RAW+JPEG）。"""
+    from . import pairs as pairsmod
+
+    cfg = Config.load()
+    with dbmod.connect(cfg.database_url) as conn:
+        res = pairsmod.backfill(conn, dry_run=args.dry_run)
+        if not args.dry_run:
+            conn.commit()
+    n = len(res["merged"])
+    print(f"发现 {res['candidates']} 组 RAW+JPEG（同目录同名）")
+    for p in res["merged"][:10]:
+        print(f"  {p['raw_path']}  +  {p['jpeg_path']}")
+    if res["candidates"] > 10:
+        print(f"  … 其余 {res['candidates'] - 10} 组")
+    if args.dry_run:
+        print("\n干跑：没有写库。确认无误后去掉 --dry-run 执行。")
+    else:
+        print(f"\n已合并 {n} 组：RAW 挂到 JPEG 那条资产上（role='raw'），列表少 {n} 条。")
     return 0
 
 
@@ -415,9 +437,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--yes", action="store_true", help="真的删除；不加只统计")
     s.set_defaults(func=cmd_prune_live_dups)
 
+    s = sub.add_parser("pair", help="合并历史 RAW+JPEG（同目录同名的两条资产合成一条）")
+    s.add_argument("--dry-run", action="store_true", help="只统计，不写库")
+    s.set_defaults(func=cmd_pair)
+
     s = sub.add_parser("serve", help="启动 Web 界面")
     s.add_argument("--host", default="0.0.0.0")
-    s.add_argument("--port", type=int, default=8080)
+    s.add_argument("--port", type=int, default=7878)
     s.set_defaults(func=cmd_serve)
 
     s = sub.add_parser("bridge", help="宿主机桥：打开资源管理器 / 剪贴板（Windows）")

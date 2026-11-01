@@ -53,6 +53,8 @@ const meta = computed(
   () => `${props.asset.width || '?'}×${props.asset.height || '?'} · ${fmtBytes(props.asset.bytes)}`,
 )
 const dateText = computed(() => takenDateText(props.asset))
+/** 素材库不把「未识别设备」当成需要处理的问题，只留中性的设备入口 */
+const unknownDevice = computed(() => props.asset.device_unknown === true && props.asset.library !== 'material')
 
 async function loadExtras() {
   const id = props.asset.id
@@ -201,14 +203,21 @@ onBeforeUnmount(() => {
       <div class="flex flex-wrap items-center justify-center gap-x-2 gap-y-1.5 text-[12.5px] text-mut">
         <button
           class="inline-flex items-center gap-1.5 rounded-full bg-panel2 px-2.5 py-1 text-[12.5px] tap"
-          :class="asset.device_unknown && '!text-warn'"
+          :class="unknownDevice && '!text-warn'"
           :title="asset.device_raw || 'EXIF 里没有机型'"
           @click="pickingDevice = true"
         >
-          <span>📷 {{ asset.device_unknown ? '未识别设备' : asset.model }}</span>
+          <span>📷 {{ unknownDevice ? '未识别设备' : asset.device_unknown ? '设备' : asset.model }}</span>
           <span class="text-[11px] opacity-60">更换</span>
         </button>
         <span>{{ meta }}</span>
+        <span
+          v-if="asset.raw_ext"
+          class="inline-flex items-center gap-1 rounded-full bg-panel2 px-2.5 py-1 text-[12.5px] text-warn"
+          :title="`出稿时连同 RAW（${asset.raw_ext}）一起给`"
+        >
+          RAW+JPEG · {{ fmtBytes(asset.raw_bytes) }}
+        </span>
       </div>
 
       <div v-if="faces.length" class="flex flex-wrap items-center gap-2">
