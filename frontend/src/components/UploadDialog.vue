@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUploadStore, type UploadJob } from '@/stores/upload'
+import { filesFromDrop } from '@/utils/files'
 import { fmtBytes } from '@/utils/format'
 import DevicePicker from './DevicePicker.vue'
 
@@ -9,6 +10,69 @@ const router = useRouter()
 const upload = useUploadStore()
 const fileInput = ref<HTMLInputElement | null>(null)
 const pickingDevice = ref(false)
+
+/* ---- 拖入 ----
+   只在对话框开着的时候接文件：这是「仅点击导入后才奏效」的拖入入口。
+   App.vue 的全局护栏只拦浏览器默认行为，真正收文件的是这里。
+   dragenter/dragleave 在子元素间穿梭会成对触发，用计数器判断是否真离开窗口。 */
+const dragging = ref(false)
+let dragDepth = 0
+
+function hasFiles(event: DragEvent): boolean {
+  return !!event.dataTransfer?.types.includes('Files')
+}
+
+function onDragEnter(event: DragEvent) {
+  if (!hasFiles(event)) return
+  dragDepth += 1
+  dragging.value = true
+}
+
+function onDragOver(event: DragEvent) {
+  if (!hasFiles(event)) return
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
+}
+
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (!dragDepth) dragging.value = false
+}
+
+async function onDrop(event: DragEvent) {
+  if (!hasFiles(event)) return
+  event.preventDefault()
+  dragDepth = 0
+  dragging.value = false
+  const files = await filesFromDrop(event.dataTransfer)
+  if (files.length) upload.addFiles(files, upload.library)
+}
+
+watch(
+  () => upload.open,
+  open => {
+    dragDepth = 0
+    dragging.value = false
+    if (open) {
+      window.addEventListener('dragenter', onDragEnter)
+      window.addEventListener('dragover', onDragOver)
+      window.addEventListener('dragleave', onDragLeave)
+      window.addEventListener('drop', onDrop)
+    } else {
+      window.removeEventListener('dragenter', onDragEnter)
+      window.removeEventListener('dragover', onDragOver)
+      window.removeEventListener('dragleave', onDragLeave)
+      window.removeEventListener('drop', onDrop)
+    }
+  },
+)
+
+onBeforeUnmount(() => {
+  window.removeEventListener('dragenter', onDragEnter)
+  window.removeEventListener('dragover', onDragOver)
+  window.removeEventListener('dragleave', onDragLeave)
+  window.removeEventListener('drop', onDrop)
+})
 
 const ACCEPT =
   'image/*,video/*,.heic,.heif,.jfif,.jpe,.dng,.cr2,.cr3,.nef,.arw,.raf,.orf,.rw2,.pef,.srw,.mts,.m2ts,.insv,.360,.lrv'
@@ -58,8 +122,15 @@ function onFiles(event: Event) {
     @click.self="upload.closeDialog()"
   >
     <div
-      class="flex max-h-[84vh] w-full max-w-[640px] flex-col overflow-hidden rounded-t-2xl bg-panel"
+      class="relative flex max-h-[84vh] w-full max-w-[640px] flex-col overflow-hidden rounded-t-2xl bg-panel"
+      :class="dragging && 'ring-2 ring-inset ring-acc'"
     >
+      <div
+        v-if="dragging"
+        class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-[rgba(10,132,255,.14)] text-[15px] font-semibold text-acc"
+      >
+        松手把文件加入队列
+      </div>
       <div class="flex items-center px-[18px] pb-2 pt-4">
         <h3 class="m-0 flex-1 text-[17px]">导入</h3>
         <button class="w-7 text-right text-[18px] text-mut" @click="upload.closeDialog()">✕</button>

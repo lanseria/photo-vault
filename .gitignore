@@ -3,12 +3,13 @@
 __pycache__/
 *.pyc
 
-# 前端依赖（构建产物 vault/static/ 要提交，否则镜像里没有页面）
+# 前端依赖与构建产物：产物由 Dockerfile 的 web 阶段现场构建，不进 git
 frontend/node_modules/
+vault/static/
 
 # 本地配置（.env.example 是模板，要提交）
 .env
 
 # 模型权重（数 GB，手动下载，见 README「模型权重」）
 models/
-ml/assets/ram/ 
+ml/assets/

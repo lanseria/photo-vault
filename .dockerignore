@@ -1,0 +1,18 @@
+# 构建上下文只送源码：依赖与前端产物在镜像里现场生成，
+# 数据目录（host/media/models）是运行时挂载的，永远不进构建上下文。
+
+.git
+.venv
+**/__pycache__
+
+# 前端依赖与构建产物：web 阶段现场 install / build
+frontend/node_modules
+vault/static
+
+# 运行时挂载或本地数据，镜像里用不到
+host
+media
+models
+data
+ml/assets
+ml/.venv
