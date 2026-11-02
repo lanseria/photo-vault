@@ -8,6 +8,7 @@ import { useFeedStore } from '@/stores/feed'
 import { useSelectionStore } from '@/stores/selection'
 import { useChromeStore } from '@/stores/chrome'
 import { usePeopleStore } from '@/stores/people'
+import { useFoldersStore } from '@/stores/folders'
 import { useAssetActions } from '@/composables/useAssetActions'
 import { usePhotoQuery } from '@/composables/usePhotoQuery'
 import { isGroupMode } from '@/utils/date'
@@ -15,12 +16,20 @@ import { readScroll, restoreScroll, scrollKey } from '@/composables/scrollMemory
 import PhotoCell from '@/components/PhotoCell.vue'
 import PhotoLightbox from '@/components/PhotoLightbox.vue'
 import TimelineScrubber from '@/components/TimelineScrubber.vue'
+import { setAssetDragData } from '@/utils/dnd'
+
+/**
+ * draggable：格子能否整格拖拽。只有素材库（有文件夹落点）传 true，
+ * 拖起手时带上当前选中的资产 id（utils/dnd.ts 的站内协议）。
+ */
+const props = defineProps<{ draggable?: boolean }>()
 
 const route = useRoute()
 const feed = useFeedStore()
 const selection = useSelectionStore()
 const chrome = useChromeStore()
 const people = usePeopleStore()
+const folders = useFoldersStore()
 const actions = useAssetActions()
 const photo = usePhotoQuery()
 
@@ -28,12 +37,19 @@ const sentinel = ref<HTMLElement | null>(null)
 /** 深链进来的资产可能不在当前分页里，单独取一份 */
 const orphan = ref<Asset | null>(null)
 let observer: IntersectionObserver | null = null
+/** Shift 范围选择的起点（最后普通点过的那格） */
+const anchorId = ref<string | null>(null)
 
 const cfg = computed<FeedConfig>(() => ({
   kind: (route.meta.feed as FeedKind) ?? 'gallery',
   library: (route.meta.library as Library) ?? 'gallery',
   tag: typeof route.params.tag === 'string' ? route.params.tag : null,
-  personId: typeof route.params.id === 'string' ? route.params.id : null,
+  personId: typeof route.params.id === 'string' && route.meta.feed === 'person'
+    ? route.params.id
+    : null,
+  folderId: typeof route.params.id === 'string' && route.meta.feed === 'folder'
+    ? route.params.id
+    : null,
   q: typeof route.query.q === 'string' ? route.query.q : '',
   kindFilter: typeof route.query.kind === 'string' ? route.query.kind : '',
   dur: typeof route.query.dur === 'string' ? route.query.dur : '',
@@ -46,6 +62,14 @@ const cfgKey = computed(() => JSON.stringify(cfg.value))
 
 const emptyText = computed(() => {
   const kind = cfg.value.kind
+  if (kind === 'unfiled') {
+    return folders.folders.length
+      ? '没有未整理的素材。\n所有素材都已归入文件夹，点上面的文件夹查看。'
+      : '素材库是空的。\n先建一个文件夹（右上「＋ 新建」），到「图库」勾选素材 → 底部「素材库」移进来，\n再选中素材点底部「文件夹」归档。'
+  }
+  if (kind === 'folder') {
+    return '这个文件夹是空的。\n回到「素材库」选中素材，点底部「文件夹」移进来。'
+  }
   if (kind === 'material') {
     return '素材库是空的。\n到「图库」点右上角「选择」→ 勾选素材 → 底部「素材库」，就能把资源移进来。\n移进来的素材保留 AI 标签、人脸和视频摘要。'
   }
@@ -70,18 +94,27 @@ function syncTitle() {
           ? tag || '标签'
           : kind === 'person'
             ? people.nameOf(personId) || '人物'
-            : kind === 'material'
-              ? '素材库'
-              : '图库'
+            : kind === 'folder'
+              ? folders.nameOf(cfg.value.folderId) || '文件夹'
+              : kind === 'material' || kind === 'unfiled'
+                ? '素材库'
+                : '图库'
   if ((kind === 'favorites' || kind === 'tag') && library === 'material') title += ' · 素材库'
   chrome.set({ title })
 }
 
 async function load() {
+  anchorId.value = null // 换了视图，Shift 的范围起点作废
   syncTitle()
   if (cfg.value.kind === 'person' && cfg.value.personId) {
     if (!people.nameOf(cfg.value.personId)) {
       void people.load().then(() => syncTitle())
+    }
+  }
+  if (cfg.value.kind === 'folder' && cfg.value.folderId) {
+    // 文件夹名字是异步到的：先显示「文件夹」，列表到了再替换
+    if (!folders.nameOf(cfg.value.folderId)) {
+      void folders.load().then(() => syncTitle())
     }
   }
   const target = readScroll(scrollKey(route))
@@ -142,9 +175,36 @@ watch(
   () => void ensurePhoto(),
 )
 
-function onActivate(asset: Asset) {
+function onActivate(asset: Asset, event?: MouseEvent) {
+  // 键盘多选：Ctrl/Cmd 点选加减，Shift 点选圈一段（桌面文件管理器的习惯）。
+  // 触屏 / 普通点击走老路：选择模式里是切换，否则开灯箱。
+  const items = feed.items
+  const idx = items.findIndex(a => a.id === asset.id)
+  if (event?.shiftKey && idx >= 0) {
+    if (!selection.active) selection.start()
+    const from = anchorId.value ? items.findIndex(a => a.id === anchorId.value) : -1
+    const lo = from >= 0 ? Math.min(from, idx) : 0
+    const hi = from >= 0 ? Math.max(from, idx) : idx
+    for (let i = lo; i <= hi; i++) selection.select(items[i].id)
+    anchorId.value = asset.id
+    return
+  }
+  if ((event?.ctrlKey || event?.metaKey) && idx >= 0) {
+    if (!selection.active) selection.start()
+    selection.toggle(asset.id)
+    anchorId.value = asset.id
+    return
+  }
+  anchorId.value = asset.id
   if (selection.active) selection.toggle(asset.id)
   else photo.open(asset.id)
+}
+
+/** 拖拽起手：拖的是选中成员就带整个选中集，否则只带这一格 */
+function onCellDragStart(event: DragEvent, asset: Asset) {
+  if (!props.draggable) return
+  const ids = selection.active && selection.isSelected(asset.id) ? selection.list() : [asset.id]
+  setAssetDragData(event, ids)
 }
 
 function stepPhoto(delta: number) {
@@ -256,7 +316,9 @@ function onKeydown(event: KeyboardEvent) {
           :asset="asset"
           :selecting="selection.active"
           :selected="selection.isSelected(asset.id)"
-          @activate="onActivate(asset)"
+          :draggable="draggable"
+          @activate="onActivate(asset, $event)"
+          @dragstart="onCellDragStart($event, asset)"
         />
       </div>
     </div>

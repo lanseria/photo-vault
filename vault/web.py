@@ -216,6 +216,7 @@ def api_assets(
     max_sec: float | None = Query(None, ge=0),
     min_px: int | None = Query(None, ge=0),
     device: str | None = Query(None, description="设备 id，或 'unknown' 表示未识别"),
+    folder: str | None = Query(None, description="素材库文件夹 id，或 'none' 表示未整理"),
 ) -> JSONResponse:
     where = ["a.is_deleted" if trash else "not a.is_deleted"]
     params: list[Any] = []
@@ -284,6 +285,13 @@ def api_assets(
             params.append(int(device))
         else:
             raise HTTPException(400, "device 只能是设备 id 或 'unknown'")
+    if folder:
+        # 文件夹是素材库的整理维度：'none' = 未整理，其余按文件夹 id 精确过滤
+        if folder == "none":
+            where.append("a.folder_id is null")
+        else:
+            where.append("a.folder_id = %s::uuid")
+            params.append(_asset_id(folder))
 
     clause = " and ".join(where)
     base = f"""
@@ -298,7 +306,7 @@ def api_assets(
     total = q(f"select count(*) c {base}", tuple(params))[0]["c"]
     rows = q(
         f"""select a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_offset_min, a.tz_source,
-                   a.width, a.height, a.duration_ms,
+                   a.width, a.height, a.duration_ms, a.folder_id,
                    a.device_id, d.label as device_label, d.model_raw as device_raw,
                    d.model_canonical as device_canonical, d.kind as device_kind,
                    f.sha256, f.bytes, f.ext, f.origin_rel, f.storage_mode,
@@ -334,7 +342,7 @@ class DeliverBody(BaseModel):
 
 
 _ITEM_COLS = """a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_source,
-                a.width, a.height, a.duration_ms,
+                a.width, a.height, a.duration_ms, a.folder_id,
                 a.device_id, d.label as device_label, d.model_raw as device_raw,
                 d.model_canonical as device_canonical, d.kind as device_kind,
                 f.sha256, f.bytes, f.ext, f.origin_rel,
@@ -354,6 +362,8 @@ def _item_json(r: dict[str, Any], ord_: int | None = None, trash: bool = False) 
         "favorite": r["favorite"],
         "taken": r["taken_at_local"].isoformat() if r["taken_at_local"] else None,
         "tz_source": r["tz_source"],
+        # 素材库文件夹：null = 未整理
+        "folder_id": str(r["folder_id"]) if r.get("folder_id") else None,
         # 展示名（用户标签 > 归一化型号 > EXIF 原始型号）；未识别时是固定文案
         "model": _device_name(r),
         "device_id": r["device_id"],
@@ -881,10 +891,11 @@ class TagBody(BaseModel):
 
 
 class BatchBody(BaseModel):
-    ids: list[str]
     action: str                 # favorite | unfavorite | trash | restore | move | tag | untag
+    ids: list[str]              #        | set_folder | clear_folder（folder_id 见下）
     tag: str | None = None
     library: str | None = None  # move 时必填：gallery | material
+    folder_id: str | None = None  # set_folder 时必填：素材库文件夹 id
 
 
 class AnalyzeBody(BaseModel):
@@ -1007,6 +1018,26 @@ def api_batch(body: BatchBody) -> JSONResponse:
                 n = conn.execute("""delete from asset_tags at2 using assets a
                                     where at2.asset_id=a.id and a.id=any(%s::uuid[])
                                       and at2.tag_id=%s""", (ids, tid)).rowcount
+        elif body.action == "set_folder":
+            if not body.folder_id:
+                raise HTTPException(400, "set_folder 需要 folder_id")
+            fid = _asset_id(body.folder_id)
+            # 在事务里用同一个连接查（嵌套 q() 会从池里再抓一条连接）
+            if not conn.execute("select 1 from material_folders where id=%s::uuid",
+                                (fid,)).fetchone():
+                raise HTTPException(404, "文件夹不存在")
+            # 只动素材库的资产：文件夹是素材库的整理维度，图库没有这个概念
+            n = conn.execute(
+                "update assets set folder_id=%s "
+                "where id=any(%s::uuid[]) and not is_deleted and library='material'",
+                (fid, ids),
+            ).rowcount
+        elif body.action == "clear_folder":
+            n = conn.execute(
+                "update assets set folder_id=null "
+                "where id=any(%s::uuid[]) and not is_deleted",
+                (ids,),
+            ).rowcount
         else:
             raise HTTPException(400, "unknown action")
     return JSONResponse({"updated": n})
@@ -1033,6 +1064,100 @@ def api_analyze(body: AnalyzeBody) -> JSONResponse:
             by_kind[kind] = cur.rowcount
     total = sum(by_kind.values())
     return JSONResponse({"queued": total, "by_kind": by_kind})
+
+
+# ---------------------------------------------------------------- 素材库文件夹
+# 时间轴只回答"什么时候存的"，剪辑时找素材靠的是"这批素材属于哪个项目"。
+# 文件夹就是用户手动整理的项目维度：建文件夹 → 选中素材归进去。
+# 素材与文件夹是单归属（assets.folder_id），删文件夹时素材自动回到「未整理」。
+
+class FolderBody(BaseModel):
+    name: str
+
+
+_FOLDER_LIST_SQL = """
+select mf.id, mf.name, mf.created_at, mf.updated_at,
+       (select count(*) from assets a
+         where a.folder_id = mf.id and not a.is_deleted) n_assets,
+       -- 必须 encode：sha256 列是 bytea，直接 select 出来是 Python bytes，
+       -- 塞进 f-string 会变成 b"\\x.." 的 repr，拼出的封面 URL 必然 404
+       (select encode(f.sha256, 'hex') from assets a
+          join files f on f.asset_id = a.id and f.role = 'original'
+         where a.folder_id = mf.id and not a.is_deleted
+         order by a.taken_at_utc desc nulls last limit 1) cover_sha
+  from material_folders mf
+"""
+
+
+def _folder_json(r: dict[str, Any]) -> dict[str, Any]:
+    cover_sha = r["cover_sha"]
+    return {
+        "id": str(r["id"]),
+        "name": r["name"],
+        "count": r["n_assets"],
+        # 封面 = 文件夹里最新一条素材的缩略图；空文件夹、或缩略图还没生成的都不给 URL，
+        # 前端用 🗂 占位 —— 总比一张 404 的破图好
+        "cover": (f"/thumbs/{cover_sha}.webp" if cover_sha and _thumb_ok(cover_sha) else None),
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+    }
+
+
+def _clean_folder_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name or len(name) > 40:
+        raise HTTPException(400, "文件夹名需为 1-40 个字符")
+    return name
+
+
+@app.get("/api/material/folders")
+def api_folders() -> JSONResponse:
+    # 新建的排前面：整理素材时刚建的文件夹最常用
+    rows = q(f"{_FOLDER_LIST_SQL} order by mf.created_at desc")
+    unfiled = q(
+        """select count(*) c from assets
+            where library = 'material' and folder_id is null and not is_deleted"""
+    )[0]["c"]
+    return JSONResponse({"folders": [_folder_json(r) for r in rows], "unfiled": unfiled})
+
+
+@app.post("/api/material/folders")
+def api_folder_create(body: FolderBody) -> JSONResponse:
+    name = _clean_folder_name(body.name)
+    taken = q("select 1 from material_folders where lower(name) = lower(%s)", (name,))
+    if taken:
+        raise HTTPException(409, "已经有同名文件夹了")
+    row = q("insert into material_folders (name) values (%s) returning id", (name,))[0]
+    out = q(f"select * from ({_FOLDER_LIST_SQL}) t where t.id = %s", (row["id"],))[0]
+    return JSONResponse(_folder_json(out))
+
+
+@app.patch("/api/material/folders/{folder_id}")
+def api_folder_rename(folder_id: str, body: FolderBody) -> JSONResponse:
+    fid = _asset_id(folder_id)
+    name = _clean_folder_name(body.name)
+    taken = q("select 1 from material_folders where lower(name) = lower(%s) and id <> %s::uuid",
+              (name, fid))
+    if taken:
+        raise HTTPException(409, "已经有同名文件夹了")
+    rows = q("update material_folders set name=%s, updated_at=now() "
+             "where id=%s::uuid returning id", (name, fid))
+    if not rows:
+        raise HTTPException(404, "文件夹不存在")
+    out = q(f"select * from ({_FOLDER_LIST_SQL}) t where t.id = %s", (fid,))[0]
+    return JSONResponse(_folder_json(out))
+
+
+@app.delete("/api/material/folders/{folder_id}")
+def api_folder_delete(folder_id: str) -> JSONResponse:
+    """删文件夹只删登记：素材回到「未整理」（FK on delete set null），原件不动。"""
+    fid = _asset_id(folder_id)
+    assert pool is not None
+    with pool.connection() as conn:
+        n = conn.execute("delete from material_folders where id=%s::uuid", (fid,)).rowcount
+    if not n:
+        raise HTTPException(404, "文件夹不存在")
+    return JSONResponse({"deleted": n})
 
 
 # ---------------------------------------------------------------- 人物 / 人脸
@@ -1245,7 +1370,7 @@ def _upload_source(conn: Any) -> int:
 
 _UPLOAD_ASSET_SQL = """
 select a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_source,
-       a.width, a.height, a.duration_ms,
+       a.width, a.height, a.duration_ms, a.folder_id,
        a.device_id, d.label as device_label, d.model_raw as device_raw,
        d.model_canonical as device_canonical, d.kind as device_kind,
        f.bytes, f.ext, f.origin_rel,

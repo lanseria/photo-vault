@@ -35,6 +35,14 @@ export const useSelectionStore = defineStore('selection', () => {
     ids.value = next
   }
 
+  /** 只加不减：Shift 范围选中的一段直接圈进来 */
+  function select(id: string) {
+    if (ids.value.has(id)) return
+    const next = new Set(ids.value)
+    next.add(id)
+    ids.value = next
+  }
+
   function setScope(all: string[]) {
     scope.value = all
   }
@@ -58,6 +66,7 @@ export const useSelectionStore = defineStore('selection', () => {
     stop,
     isSelected,
     toggle,
+    select,
     setScope,
     selectAll,
     list,

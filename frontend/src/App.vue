@@ -6,16 +6,13 @@ import { useChromeStore } from '@/stores/chrome'
 import { useBinStore } from '@/stores/bin'
 import { useSelectionStore } from '@/stores/selection'
 import { useSystemStore } from '@/stores/system'
-import { useToastStore } from '@/stores/toast'
 import { useUploadStore } from '@/stores/upload'
-import { filesFromDrop } from '@/utils/files'
 import AppHeader from '@/components/AppHeader.vue'
 import NavChips from '@/components/NavChips.vue'
 import FilterBar from '@/components/FilterBar.vue'
 import SelectionBar from '@/components/SelectionBar.vue'
 import TagSheet from '@/components/TagSheet.vue'
 import UploadDialog from '@/components/UploadDialog.vue'
-import DropOverlay from '@/components/DropOverlay.vue'
 import ToastHost from '@/components/ToastHost.vue'
 import DialogHost from '@/components/DialogHost.vue'
 
@@ -24,7 +21,6 @@ const system = useSystemStore()
 const bin = useBinStore()
 const selection = useSelectionStore()
 const upload = useUploadStore()
-const toast = useToastStore()
 const chrome = useChromeStore()
 
 useScrollMemory()
@@ -33,7 +29,13 @@ const dropLibrary = computed<'gallery' | 'material'>(() =>
   route.meta.library === 'material' ? 'material' : 'gallery',
 )
 
-const dragging = ref(false)
+/* ---- 拖拽 ----
+   拖文件进窗口直接导入的功能已取消：导入一律走右上角「导入」按钮。
+   这里只拦住浏览器默认行为 —— 不拦的话，文件落进窗口会整页跳到那个文件。
+   站内的「照片拖进素材库文件夹」是另一套 dataTransfer 类型（utils/dnd.ts），不受影响。 */
+function guardFileDrop(event: DragEvent) {
+  if (event.dataTransfer?.types.includes('Files')) event.preventDefault()
+}
 
 // 浏览器标签页标题跟着视图走，历史记录里也看得出是哪一页
 watch(
@@ -43,41 +45,6 @@ watch(
   },
   { immediate: true },
 )
-
-let dragDepth = 0
-
-function hasFiles(event: DragEvent): boolean {
-  const types = event.dataTransfer?.types
-  return !!types && Array.from(types).includes('Files')
-}
-
-function onDragEnter(event: DragEvent) {
-  if (!hasFiles(event)) return
-  event.preventDefault()
-  dragDepth += 1
-  dragging.value = true
-}
-
-function onDragOver(event: DragEvent) {
-  if (!hasFiles(event)) return
-  event.preventDefault()
-  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
-}
-
-function onDragLeave() {
-  dragDepth = Math.max(0, dragDepth - 1)
-  if (!dragDepth) dragging.value = false
-}
-
-async function onDrop(event: DragEvent) {
-  event.preventDefault()
-  dragDepth = 0
-  dragging.value = false
-  if (!hasFiles(event)) return
-  const files = await filesFromDrop(event.dataTransfer)
-  if (files.length) upload.addFiles(files, dropLibrary.value)
-  else toast.show('没有可导入的图片或视频')
-}
 
 /* ---- 顶部固定区：标题 + 标签页 + 筛选器，滚动时只有时间轴动 ---- */
 
@@ -98,10 +65,8 @@ onMounted(() => {
     .then(() => bin.refreshSummary())
     .catch(() => undefined)
 
-  window.addEventListener('dragenter', onDragEnter)
-  window.addEventListener('dragover', onDragOver)
-  window.addEventListener('dragleave', onDragLeave)
-  window.addEventListener('drop', onDrop)
+  window.addEventListener('dragover', guardFileDrop)
+  window.addEventListener('drop', guardFileDrop)
   window.addEventListener('scroll', syncScrolled, { passive: true })
   syncScrolled()
 
@@ -119,10 +84,8 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('dragenter', onDragEnter)
-  window.removeEventListener('dragover', onDragOver)
-  window.removeEventListener('dragleave', onDragLeave)
-  window.removeEventListener('drop', onDrop)
+  window.removeEventListener('dragover', guardFileDrop)
+  window.removeEventListener('drop', guardFileDrop)
   window.removeEventListener('scroll', syncScrolled)
   resizeObserver?.disconnect()
   resizeObserver = null
@@ -145,7 +108,6 @@ onBeforeUnmount(() => {
     <SelectionBar v-if="selection.active && route.meta.selectable" />
     <TagSheet />
     <UploadDialog />
-    <DropOverlay :visible="dragging" :library="dropLibrary" />
     <ToastHost />
     <DialogHost />
   </div>

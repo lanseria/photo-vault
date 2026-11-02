@@ -29,6 +29,8 @@ export interface Asset {
   raw_ext: string
   raw_bytes: number
   tags: string[]
+  /** 素材库文件夹；null = 未整理 */
+  folder_id?: string | null
   deleted?: boolean
   /** 剪辑箱里的序号 */
   ord?: number
@@ -94,6 +96,22 @@ export interface BinList {
 
 export interface BinItems {
   items: Asset[]
+}
+
+export interface MaterialFolder {
+  id: string
+  name: string
+  count: number
+  /** 封面缩略图 URL（文件夹里最新一条素材）；空文件夹为 null */
+  cover: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface FolderList {
+  folders: MaterialFolder[]
+  /** 未归入任何文件夹的素材数 */
+  unfiled: number
 }
 
 export interface Face {

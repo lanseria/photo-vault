@@ -9,7 +9,9 @@ import type {
   Device,
   DeviceList,
   Face,
+  FolderList,
   ImportRun,
+  MaterialFolder,
   Person,
   PersonList,
   Stats,
@@ -85,6 +87,8 @@ export interface AssetQuery {
   min_px?: number
   /** 设备 id 字符串，或 'unknown' = 未识别设备 */
   device?: string
+  /** 素材库文件夹 id，或 'none' = 未整理 */
+  folder?: string
 }
 
 export const api = {
@@ -101,9 +105,19 @@ export const api = {
 
   batch: (body: {
     ids: string[]
-    action: 'favorite' | 'unfavorite' | 'trash' | 'restore' | 'move' | 'tag' | 'untag'
+    action:
+      | 'favorite'
+      | 'unfavorite'
+      | 'trash'
+      | 'restore'
+      | 'move'
+      | 'tag'
+      | 'untag'
+      | 'set_folder'
+      | 'clear_folder'
     tag?: string
     library?: string
+    folder_id?: string | null
   }) => request<{ updated: number }>('/api/assets/batch', jsonBody('POST', body)),
 
   favorite: (id: string, favorite: boolean) =>
@@ -175,6 +189,14 @@ export const api = {
     request<{ cleared: number }>(`/api/bins/${id}/items`, { method: 'DELETE' }),
   deliverBin: (id: string, mode: 'link' | 'copy' = 'link') =>
     request<DeliverResult>(`/api/bins/${id}/deliver`, jsonBody('POST', { mode })),
+
+  folders: () => request<FolderList>('/api/material/folders'),
+  createFolder: (name: string) =>
+    request<MaterialFolder>('/api/material/folders', jsonBody('POST', { name })),
+  renameFolder: (id: string, name: string) =>
+    request<MaterialFolder>(`/api/material/folders/${id}`, jsonBody('PATCH', { name })),
+  deleteFolder: (id: string) =>
+    request<{ deleted: number }>(`/api/material/folders/${id}`, { method: 'DELETE' }),
 
   cinema: (q = '') =>
     request<CinemaList>(`/api/cinema${q ? `?q=${encodeURIComponent(q)}` : ''}`),

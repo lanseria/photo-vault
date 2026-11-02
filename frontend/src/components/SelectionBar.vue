@@ -7,6 +7,7 @@ import { useSelectionStore } from '@/stores/selection'
 import { useTagSheetStore } from '@/stores/tagSheet'
 import AppIcon from './AppIcon.vue'
 import DevicePicker from './DevicePicker.vue'
+import FolderPicker from './FolderPicker.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -16,10 +17,15 @@ const sheet = useTagSheetStore()
 const actions = useAssetActions()
 
 const devicePickerOpen = ref(false)
+const folderPickerOpen = ref(false)
 
 const trashView = computed(() => route.meta.feed === 'trash')
 const movable = computed(() => !!route.meta.feed && !trashView.value)
 const inMaterial = computed(() => route.meta.library === 'material')
+/** 当前正在浏览的素材库文件夹；在里面多选时「移出」才有意义 */
+const currentFolderId = computed(() =>
+  route.meta.feed === 'folder' && typeof route.params.id === 'string' ? route.params.id : null,
+)
 const one = computed(() =>
   selection.count === 1 ? (feed.items.find(a => a.id === selection.firstId) ?? null) : null,
 )
@@ -36,6 +42,13 @@ function addToBin() {
 
 function moveLibrary() {
   void actions.moveTo(inMaterial.value ? 'gallery' : 'material')
+}
+
+/** 移入 / 移出素材库文件夹；点「当前」的文件夹等于没动，直接关掉 */
+async function pickFolder(folderId: string | null) {
+  folderPickerOpen.value = false
+  if (folderId && folderId === currentFolderId.value) return
+  await actions.setFolder(selection.list(), folderId)
 }
 
 function openTags() {
@@ -88,6 +101,14 @@ function purge() {
       <button
         v-if="movable && inMaterial"
         class="flex flex-col items-center gap-[3px] px-1.5 text-[10.5px]"
+        @click="folderPickerOpen = true"
+      >
+        <AppIcon name="folderOpen" :size="22" />
+        文件夹
+      </button>
+      <button
+        v-if="movable && inMaterial"
+        class="flex flex-col items-center gap-[3px] px-1.5 text-[10.5px]"
         @click="actions.enqueueAI(selection.list())"
       >
         <AppIcon name="sparkles" :size="22" />
@@ -129,6 +150,13 @@ function purge() {
       @pick="pickDevice"
       @close="devicePickerOpen = false"
       @manage="devicePickerOpen = false; router.push('/devices')"
+    />
+
+    <FolderPicker
+      v-if="folderPickerOpen"
+      :current-folder-id="currentFolderId"
+      @pick="pickFolder"
+      @close="folderPickerOpen = false"
     />
   </div>
 </template>

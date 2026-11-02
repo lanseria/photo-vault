@@ -11,9 +11,15 @@ const props = defineProps<{
   /** 剪辑箱里的顺序号（1 开始），其他视图不传 */
   order?: number
   removable?: boolean
+  /** 允许整格拖拽（素材库拖进文件夹用），其他视图不传 */
+  draggable?: boolean
 }>()
 
-const emit = defineEmits<{ activate: []; remove: [] }>()
+const emit = defineEmits<{
+  activate: [event?: MouseEvent]
+  dragstart: [event: DragEvent]
+  remove: []
+}>()
 
 const thumb = computed(() => `/thumbs/${props.asset.sha}.webp`)
 const duration = computed(() => (props.asset.kind === 'video' ? fmtDur(props.asset.duration_ms) : ''))
@@ -28,7 +34,9 @@ const showUnknown = computed(() => props.asset.device_unknown === true && props.
     class="relative aspect-square bg-panel overflow-hidden cursor-pointer select-none"
     :data-id="asset.id"
     :title="asset.model"
-    @click="emit('activate')"
+    :draggable="!!props.draggable"
+    @click="emit('activate', $event)"
+    @dragstart="emit('dragstart', $event)"
   >
     <img
       v-if="asset.has_thumb"

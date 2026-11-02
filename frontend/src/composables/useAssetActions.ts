@@ -6,6 +6,7 @@ import { useBinStore } from '@/stores/bin'
 import { useDevicesStore } from '@/stores/devices'
 import { useDialogStore } from '@/stores/dialog'
 import { useFeedStore } from '@/stores/feed'
+import { useFoldersStore } from '@/stores/folders'
 import { useSelectionStore } from '@/stores/selection'
 import { useSystemStore } from '@/stores/system'
 import { useToastStore } from '@/stores/toast'
@@ -96,6 +97,33 @@ export function useAssetActions() {
     }
   }
 
+  /**
+   * 移入 / 移出素材库文件夹。folderId=null = 移出，素材回到「未整理」。
+   * 无论移进还是移出，资产都会离开当前视图（未整理 / 某个文件夹），本地直接删行。
+   */
+  async function setFolder(ids: string[], folderId: string | null) {
+    if (!ids.length) return
+    const folders = useFoldersStore()
+    try {
+      const res = await api.batch({
+        ids,
+        action: folderId ? 'set_folder' : 'clear_folder',
+        folder_id: folderId,
+      })
+      feed.removeMany(ids)
+      selection.stop()
+      // 文件夹的 count/cover 变了；未整理计数也一样
+      await folders.load(true)
+      toast.show(
+        folderId
+          ? `已移入「${folders.nameOf(folderId) || '文件夹'}」${res.updated} 项`
+          : `已移出文件夹 ${res.updated} 项`,
+      )
+    } catch (e) {
+      toast.show('移动失败：' + errorText(e).slice(0, 60))
+    }
+  }
+
   async function enqueueAI(ids: string[]) {
     if (!ids.length) return toast.show('没有可识别的素材')
     try {
@@ -172,8 +200,7 @@ export function useAssetActions() {
   }
 
   /** 批量设置/清除拍摄设备；deviceId=null 表示回到「未识别」。 */
-  async function setDevice(ids: string[], deviceId: number | null) {
-    if (!ids.length) return 0
+  async function setDevice(ids: string[], deviceId: number | null) {    if (!ids.length) return 0
     const devices = useDevicesStore()
     const res = await api.assignDevice(ids, deviceId)
     if (deviceId != null) await devices.load(true)
@@ -201,6 +228,7 @@ export function useAssetActions() {
     restore,
     purge,
     moveTo,
+    setFolder,
     enqueueAI,
     addToBin,
     removeFromBin,

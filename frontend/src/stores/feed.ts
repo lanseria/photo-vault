@@ -5,13 +5,15 @@ import type { Asset, Library } from '@/types'
 import { groupHeader, groupKey, type GroupMode } from '@/utils/date'
 import { useToastStore } from './toast'
 
-export type FeedKind = 'gallery' | 'material' | 'favorites' | 'tag' | 'person' | 'trash'
+export type FeedKind = 'gallery' | 'material' | 'unfiled' | 'folder' | 'favorites' | 'tag' | 'person' | 'trash'
 
 export interface FeedConfig {
   kind: FeedKind
   library: Library
   tag?: string | null
   personId?: string | null
+  /** kind='folder' 时的素材库文件夹 id */
+  folderId?: string | null
   q?: string
   /** '' | 'video' | 'photo' */
   kindFilter?: string
@@ -77,6 +79,9 @@ export const useFeedStore = defineStore('feed', () => {
     if (cfg.kind === 'trash') params.trash = true
     if (cfg.kind === 'tag' && cfg.tag) params.tag = cfg.tag
     if (cfg.kind === 'person' && cfg.personId) params.person_id = cfg.personId
+    // 文件夹视图：'unfiled' = 素材库里未整理的，'folder' = 某个文件夹内的
+    if (cfg.kind === 'unfiled') params.folder = 'none'
+    if (cfg.kind === 'folder' && cfg.folderId) params.folder = cfg.folderId
     // 素材库是 assets 表上的另一个 library 轴；收藏/标签跟着当前所在的库走，
     // 人物和回收站是跨库视图，不加 library 条件。
     if (!['trash', 'person'].includes(cfg.kind)) params.library = cfg.library

@@ -76,9 +76,24 @@ const routes: RouteRecordRaw[] = [
     title: '标签',
   }),
 
-  feed('/material', 'material', 'material', 'material', {
+  // 素材库的默认视图是文件夹：文件夹网格 + 未整理素材（MaterialView 内嵌 FeedView）。
+  // 不放筛选条 —— 那是照片流（文件夹内 / 喜欢 / 标签）的工具。
+  {
+    path: '/material',
+    name: 'material',
+    component: () => import('@/views/MaterialView.vue'),
+    meta: {
+      feed: 'unfiled',
+      library: 'material',
+      title: '素材库',
+      chip: 'material',
+      search: 'assets',
+      selectable: true,
+    },
+  },
+  feed('/material/folders/:id', 'material-folder', 'folder', 'material', {
     library: 'material',
-    title: '素材库',
+    title: '文件夹',
   }),
   feed('/material/favorites', 'material-favorites', 'favorites', 'favorites', {
     library: 'material',
