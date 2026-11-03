@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useDialogStore } from '@/stores/dialog'
 import { useFoldersStore } from '@/stores/folders'
+import type { Library } from '@/types'
 
 const props = withDefaults(
   defineProps<{
+    /** 在哪个库里挑文件夹：图库 / 素材库各一套 */
+    library: Library
     /** 当前所在的文件夹 id，用来标「当前」；null = 不在任何文件夹里 */
     currentFolderId?: string | null
   }>(),
@@ -16,6 +19,8 @@ const emit = defineEmits<{ pick: [string | null]; close: [] }>()
 const folders = useFoldersStore()
 const dialog = useDialogStore()
 
+const libName = computed(() => (props.library === 'material' ? '素材库' : '图库'))
+
 /** 新建完直接把选中的素材移进去，一步到位 */
 async function createAndPick() {
   const name = await dialog.prompt({
@@ -25,11 +30,11 @@ async function createAndPick() {
     required: true,
   })
   if (!name) return
-  const folder = await folders.create(name)
+  const folder = await folders.create(name, props.library)
   if (folder) emit('pick', folder.id)
 }
 
-onMounted(() => void folders.load(true))
+onMounted(() => void folders.load(props.library, true))
 </script>
 
 <template>
@@ -44,7 +49,7 @@ onMounted(() => void folders.load(true))
         <div class="sheet-grab" />
         <h3 class="m-0 text-center text-[16px] font-semibold">移到文件夹</h3>
         <p class="m-0 mb-3 mt-1 text-center text-[12px] leading-relaxed text-mut">
-          文件夹只改变素材在素材库里的位置，不复制、不移动磁盘文件。
+          文件夹只改变素材在{{ libName }}里的位置，不复制、不移动磁盘文件。
         </p>
 
         <div class="min-h-0 flex-1 overflow-auto">
@@ -58,7 +63,7 @@ onMounted(() => void folders.load(true))
             </span>
             <span class="min-w-0 flex-1">
               <span class="block text-[14px]">移出文件夹</span>
-              <span class="block text-[11.5px] text-mut">回到素材库的「未整理」</span>
+              <span class="block text-[11.5px] text-mut">回到{{ libName }}的「未整理」</span>
             </span>
           </button>
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import type { Library } from '@/types'
 import { useAssetActions } from '@/composables/useAssetActions'
 import { useFeedStore } from '@/stores/feed'
 import { useSelectionStore } from '@/stores/selection'
@@ -22,6 +23,10 @@ const folderPickerOpen = ref(false)
 const trashView = computed(() => route.meta.feed === 'trash')
 const movable = computed(() => !!route.meta.feed && !trashView.value)
 const inMaterial = computed(() => route.meta.library === 'material')
+/** 文件夹是每个库都有的整理维度；人物 / 回收站没有 meta.library，不显示 */
+const hasFolders = computed(() => !!route.meta.library)
+/** 当前库：文件夹按钮要按库拿对应的文件夹列表 */
+const lib = computed<Library>(() => (route.meta.library === 'material' ? 'material' : 'gallery'))
 /** 当前正在浏览的素材库文件夹；在里面多选时「移出」才有意义 */
 const currentFolderId = computed(() =>
   route.meta.feed === 'folder' && typeof route.params.id === 'string' ? route.params.id : null,
@@ -99,7 +104,7 @@ function purge() {
         {{ inMaterial ? '图库' : '素材库' }}
       </button>
       <button
-        v-if="movable && inMaterial"
+        v-if="movable && hasFolders"
         class="flex flex-col items-center gap-[3px] px-1.5 text-[10.5px]"
         @click="folderPickerOpen = true"
       >
@@ -154,6 +159,7 @@ function purge() {
 
     <FolderPicker
       v-if="folderPickerOpen"
+      :library="lib"
       :current-folder-id="currentFolderId"
       @pick="pickFolder"
       @close="folderPickerOpen = false"

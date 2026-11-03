@@ -63,9 +63,25 @@ export function legacyTarget(query: LocationQuery) {
 const routes: RouteRecordRaw[] = [
   { path: '/', redirect: to => legacyTarget(to.query) },
 
-  feed('/gallery', 'gallery', 'gallery', 'gallery', {
+  // 图库：默认视图是文件夹（图库也有自己的文件夹了）：文件夹网格 + 未整理照片
+  // （LibraryView 内嵌 FeedView）。筛选条作用于下方照片流。
+  {
+    path: '/gallery',
+    name: 'gallery',
+    component: () => import('@/views/LibraryView.vue'),
+    meta: {
+      feed: 'unfiled',
+      library: 'gallery',
+      title: '图库',
+      chip: 'gallery',
+      search: 'assets',
+      filters: true,
+      selectable: true,
+    },
+  },
+  feed('/gallery/folders/:id', 'gallery-folder', 'folder', 'gallery', {
     library: 'gallery',
-    title: '图库',
+    title: '文件夹',
   }),
   feed('/gallery/favorites', 'gallery-favorites', 'favorites', 'favorites', {
     library: 'gallery',
@@ -76,18 +92,19 @@ const routes: RouteRecordRaw[] = [
     title: '标签',
   }),
 
-  // 素材库的默认视图是文件夹：文件夹网格 + 未整理素材（MaterialView 内嵌 FeedView）。
-  // 不放筛选条 —— 那是照片流（文件夹内 / 喜欢 / 标签）的工具。
+  // 素材库：和图库同一套 LibraryView（文件夹 / 按时间两种视图，?view= 切换）。
+  // 筛选条打开：文件夹视图里作用于下方「未整理」照片流，按时间视图里作用于整条流。
   {
     path: '/material',
     name: 'material',
-    component: () => import('@/views/MaterialView.vue'),
+    component: () => import('@/views/LibraryView.vue'),
     meta: {
       feed: 'unfiled',
       library: 'material',
       title: '素材库',
       chip: 'material',
       search: 'assets',
+      filters: true,
       selectable: true,
     },
   },

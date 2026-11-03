@@ -2,9 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '@/api'
-import type { Asset, Face, VideoInfo } from '@/types'
+import type { Asset, AssetInfo, Face, VideoInfo } from '@/types'
 import { takenDateText } from '@/utils/date'
-import { fmtBytes, fmtFrameTime } from '@/utils/format'
+import { fmtBytes, fmtDur, fmtFrameTime, fmtShutter, fmtStamp } from '@/utils/format'
 import { useAssetActions } from '@/composables/useAssetActions'
 import { lockScroll, unlockScroll } from '@/composables/scrollMemory'
 import { useDevicesStore } from '@/stores/devices'
@@ -56,16 +56,130 @@ const dateText = computed(() => takenDateText(props.asset))
 /** 素材库不把「未识别设备」当成需要处理的问题，只留中性的设备入口 */
 const unknownDevice = computed(() => props.asset.device_unknown === true && props.asset.library !== 'material')
 
+/* ---------------- 详细信息面板 ---------------- */
+const infoShown = ref(false)
+const info = ref<AssetInfo | null>(null)
+
+const KIND_TEXT: Record<string, string> = {
+  photo: '照片',
+  video: '视频',
+  live_photo: '实况照片',
+  raw: 'RAW 原片',
+}
+
+const TZ_SOURCE_TEXT: Record<string, string> = {
+  exif: 'EXIF',
+  gps: 'GPS',
+  default: '兜底时区',
+  user: '手动',
+}
+
+/** 时区来源 + 偏移，如「EXIF · UTC+8」；都没给就是空 */
+const tzText = computed(() => {
+  const parts: string[] = []
+  const src = info.value?.tz_source ?? props.asset.tz_source
+  if (src && TZ_SOURCE_TEXT[src]) parts.push(TZ_SOURCE_TEXT[src])
+  const off = info.value?.tz_offset_min
+  if (off != null) {
+    const sign = off >= 0 ? '+' : '-'
+    const h = Math.floor(Math.abs(off) / 60)
+    const m = Math.abs(off) % 60
+    parts.push(`UTC${sign}${h}${m ? ':' + String(m).padStart(2, '0') : ''}`)
+  }
+  return parts.join(' · ')
+})
+
+interface InfoRow {
+  label: string
+  value: string
+  mono?: boolean
+  copy?: string
+}
+
+/** 详细信息行：有数据才出这一行，尽量给全（拍摄/同步/来源/文件/EXIF/GPS） */
+const infoRows = computed<InfoRow[]>(() => {
+  const a = props.asset
+  const inf = info.value
+  const rows: InfoRow[] = []
+  rows.push({ label: '类型', value: KIND_TEXT[a.kind] ?? a.kind })
+  rows.push({
+    label: '拍摄时间',
+    value: takenDateText(a) + (tzText.value ? `（${tzText.value}）` : ''),
+  })
+  if (inf?.synced_at) rows.push({ label: '同步时间', value: fmtStamp(inf.synced_at) })
+  if (inf?.added_at && inf.added_at !== inf.synced_at) {
+    rows.push({ label: '入库时间', value: fmtStamp(inf.added_at) })
+  }
+  const src = inf?.source
+  if (src?.label || src?.kind) {
+    rows.push({ label: '同步来源', value: [src.label, src.kind].filter(Boolean).join(' · ') })
+  }
+  if (inf?.src_path) rows.push({ label: '原始地址', value: inf.src_path, mono: true, copy: inf.src_path })
+  if (inf?.origin_rel) rows.push({ label: '库内位置', value: inf.origin_rel, mono: true, copy: inf.origin_rel })
+  if (a.width && a.height) {
+    rows.push({
+      label: '分辨率',
+      value: `${a.width}×${a.height}（${((a.width * a.height) / 1e6).toFixed(1)} MP）`,
+    })
+  }
+  if (a.duration_ms) rows.push({ label: '时长', value: fmtDur(a.duration_ms) })
+  const fmt = [inf?.ext, inf?.mime].filter(Boolean).join(' · ')
+  if (fmt) rows.push({ label: '格式', value: fmt })
+  rows.push({
+    label: '大小',
+    value: fmtBytes(a.bytes) + (a.raw_ext ? ` + RAW ${fmtBytes(a.raw_bytes)}` : ''),
+  })
+  if (inf?.device) {
+    const names = [...new Set([inf.device.model_canonical, inf.device.model_raw].filter(Boolean))]
+    if (names.length) rows.push({ label: '拍摄设备', value: names.join(' · ') })
+  }
+  if (inf?.lens) rows.push({ label: '镜头', value: inf.lens })
+  const ex = inf?.exif
+  if (ex) {
+    const parts = [
+      ex.iso != null && `ISO ${ex.iso}`,
+      ex.aperture != null && `f/${ex.aperture}`,
+      ex.shutter != null && fmtShutter(ex.shutter),
+      ex.focal_mm != null && `${Math.round(ex.focal_mm)}mm`,
+    ].filter(Boolean)
+    if (parts.length) rows.push({ label: 'EXIF', value: parts.join(' · ') })
+  }
+  if (inf?.gps) {
+    const text = `${inf.gps.lat.toFixed(6)}, ${inf.gps.lon.toFixed(6)}`
+    rows.push({ label: 'GPS', value: text, mono: true, copy: text })
+  }
+  if (inf?.sha) rows.push({ label: '指纹 SHA-256', value: `${inf.sha.slice(0, 32)}…`, mono: true, copy: inf.sha })
+  return rows
+})
+
+async function copyText(text: string, label: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.show(`${label}已复制`)
+  } catch {
+    toast.show('复制失败：浏览器不给剪贴板权限')
+  }
+}
+
 async function loadExtras() {
   const id = props.asset.id
   faces.value = []
   video.value = null
+  info.value = null
   livePlaying.value = false
 
   api
     .faces(id)
     .then(res => {
       if (props.asset.id === id) faces.value = res.faces
+    })
+    .catch(() => undefined)
+
+  // 详情（拍摄/同步/来源/EXIF/GPS）预取好，点 ⓘ 面板秒开
+  api
+    .info(id)
+    .then(res => {
+      if (props.asset.id === id) info.value = res
     })
     .catch(() => undefined)
 
@@ -153,7 +267,15 @@ onBeforeUnmount(() => {
         <AppIcon name="chevron-left" :size="26" :stroke="2.2" />
       </button>
       <div class="flex-1 text-center text-[14px] font-semibold">{{ dateText }}</div>
-      <span class="w-9" />
+      <button
+        class="icon-btn"
+        :class="infoShown && 'bg-white/15'"
+        :aria-label="infoShown ? '收起详细信息' : '详细信息'"
+        :title="infoShown ? '收起详细信息' : '详细信息'"
+        @click="infoShown = !infoShown"
+      >
+        <AppIcon name="info" :size="22" />
+      </button>
     </div>
 
     <div class="relative flex min-h-0 flex-1 items-center justify-center">
@@ -329,6 +451,44 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </div>
+
+    <!-- 详细信息：右侧滑入的面板，桌面 / 手机共用一套布局。
+         打开灯箱时就预取好了（loadExtras），点开秒出内容 -->
+    <Transition name="slide-right">
+      <aside
+        v-if="infoShown"
+        class="absolute inset-y-0 right-0 z-[8] flex w-[min(360px,92vw)] flex-col border-l border-line bg-[rgba(16,16,18,.96)] backdrop-blur-md"
+      >
+        <div class="flex items-center justify-between border-b border-line/60 px-4 py-3">
+          <h3 class="m-0 text-[15px] font-semibold">详细信息</h3>
+          <button class="icon-btn" aria-label="关闭" @click="infoShown = false">
+            <AppIcon name="close" :size="20" />
+          </button>
+        </div>
+        <div class="min-h-0 flex-1 overflow-auto px-4 py-3">
+          <div v-if="!info" class="spinner !my-6" />
+          <dl v-else class="m-0 flex flex-col gap-3.5">
+            <div v-for="row in infoRows" :key="row.label">
+              <dt class="text-[11.5px] leading-tight text-mut">{{ row.label }}</dt>
+              <dd class="m-0 mt-0.5 flex items-start gap-2">
+                <span
+                  class="min-w-0 flex-1 break-all text-[13px] leading-snug"
+                  :class="row.mono && 'font-mono text-[12px]'"
+                  >{{ row.value }}</span
+                >
+                <button
+                  v-if="row.copy"
+                  class="shrink-0 pt-0.5 text-[11px] text-mut hover:text-acc"
+                  @click="row.copy && copyText(row.copy, row.label)"
+                >
+                  复制
+                </button>
+              </dd>
+            </div>
+          </dl>
+        </div>
+      </aside>
+    </Transition>
 
     <DevicePicker
       v-if="pickingDevice"

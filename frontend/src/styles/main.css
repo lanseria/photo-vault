@@ -147,6 +147,20 @@ input[type='search']::-webkit-search-cancel-button {
   transform: scale(0.98);
 }
 
+/* 灯箱的详细信息面板：从右侧滑入 */
+.slide-right-enter-active,
+.slide-right-leave-active {
+  transition:
+    transform 0.2s ease,
+    opacity 0.2s ease;
+}
+
+.slide-right-enter-from,
+.slide-right-leave-to {
+  opacity: 0;
+  transform: translateX(24px);
+}
+
 .no-scrollbar {
   scrollbar-width: none;
 }

@@ -21,8 +21,10 @@ import { setAssetDragData } from '@/utils/dnd'
 /**
  * draggable：格子能否整格拖拽。只有素材库（有文件夹落点）传 true，
  * 拖起手时带上当前选中的资产 id（utils/dnd.ts 的站内协议）。
+ * kind：覆盖路由 meta.feed 的流类型。图库 / 素材库的同一条路由要在
+ * 「未整理」和「按时间（整个库）」两种流之间切换，见 LibraryView。
  */
-const props = defineProps<{ draggable?: boolean }>()
+const props = defineProps<{ draggable?: boolean; kind?: FeedKind }>()
 
 const route = useRoute()
 const feed = useFeedStore()
@@ -41,7 +43,7 @@ let observer: IntersectionObserver | null = null
 const anchorId = ref<string | null>(null)
 
 const cfg = computed<FeedConfig>(() => ({
-  kind: (route.meta.feed as FeedKind) ?? 'gallery',
+  kind: props.kind ?? (route.meta.feed as FeedKind) ?? 'gallery',
   library: (route.meta.library as Library) ?? 'gallery',
   tag: typeof route.params.tag === 'string' ? route.params.tag : null,
   personId: typeof route.params.id === 'string' && route.meta.feed === 'person'
@@ -61,8 +63,14 @@ const cfg = computed<FeedConfig>(() => ({
 const cfgKey = computed(() => JSON.stringify(cfg.value))
 
 const emptyText = computed(() => {
-  const kind = cfg.value.kind
+  const { kind, library } = cfg.value
   if (kind === 'unfiled') {
+    // 空态文案按库区分：图库是"导入进来"，素材库是"从图库移进来"
+    if (library === 'gallery') {
+      return folders.folders.length
+        ? '没有未整理的照片。\n所有照片都已归入文件夹，点上面的文件夹查看。'
+        : '图库是空的。\n点右上角「导入」把照片加进来；「＋ 新建」可以先建文件夹归类。'
+    }
     return folders.folders.length
       ? '没有未整理的素材。\n所有素材都已归入文件夹，点上面的文件夹查看。'
       : '素材库是空的。\n先建一个文件夹（右上「＋ 新建」），到「图库」勾选素材 → 底部「素材库」移进来，\n再选中素材点底部「文件夹」归档。'
@@ -96,7 +104,7 @@ function syncTitle() {
             ? people.nameOf(personId) || '人物'
             : kind === 'folder'
               ? folders.nameOf(cfg.value.folderId) || '文件夹'
-              : kind === 'material' || kind === 'unfiled'
+              : kind === 'material' || (kind === 'unfiled' && library === 'material')
                 ? '素材库'
                 : '图库'
   if ((kind === 'favorites' || kind === 'tag') && library === 'material') title += ' · 素材库'
@@ -114,8 +122,12 @@ async function load() {
   if (cfg.value.kind === 'folder' && cfg.value.folderId) {
     // 文件夹名字是异步到的：先显示「文件夹」，列表到了再替换
     if (!folders.nameOf(cfg.value.folderId)) {
-      void folders.load().then(() => syncTitle())
+      void folders.load(cfg.value.library).then(() => syncTitle())
     }
+  }
+  if (cfg.value.kind === 'unfiled') {
+    // 文件夹视图的空态文案依赖当前库的文件夹列表（图库 / 素材库各一套）
+    void folders.load(cfg.value.library)
   }
   const target = readScroll(scrollKey(route))
   await feed.open(cfg.value)

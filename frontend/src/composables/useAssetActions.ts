@@ -99,7 +99,8 @@ export function useAssetActions() {
 
   /**
    * 移入 / 移出素材库文件夹。folderId=null = 移出，素材回到「未整理」。
-   * 无论移进还是移出，资产都会离开当前视图（未整理 / 某个文件夹），本地直接删行。
+   * 在「未整理 / 某个文件夹」这类按文件夹切的流里，资产会离开当前视图，本地直接删行；
+   * 按时间（整个素材库）这类全库视图里资产还在库里，只是换了归属，列表不用动。
    */
   async function setFolder(ids: string[], folderId: string | null) {
     if (!ids.length) return
@@ -110,10 +111,10 @@ export function useAssetActions() {
         action: folderId ? 'set_folder' : 'clear_folder',
         folder_id: folderId,
       })
-      feed.removeMany(ids)
+      if (['unfiled', 'folder'].includes(feed.config.kind)) feed.removeMany(ids)
       selection.stop()
-      // 文件夹的 count/cover 变了；未整理计数也一样
-      await folders.load(true)
+      // 文件夹的 count/cover 变了；未整理计数也一样（按当前库重拉）
+      await folders.load(feed.config.library ?? 'gallery', true)
       toast.show(
         folderId
           ? `已移入「${folders.nameOf(folderId) || '文件夹'}」${res.updated} 项`

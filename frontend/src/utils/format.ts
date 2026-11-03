@@ -34,6 +34,21 @@ export function fmtFrameTime(ms: number): string {
   return ms >= 60000 ? fmtDur(ms) : (ms / 1000).toFixed(1) + 's'
 }
 
+/** EXIF 快门：0.004 → 1/250s；2 → 2s */
+export function fmtShutter(sec: number): string {
+  if (sec >= 1) return `${+sec.toFixed(1)}s`
+  return `1/${Math.round(1 / sec)}s`
+}
+
+/** ISO 时间戳 → 本地 yyyy-MM-dd HH:mm:ss（同步/入库时间给人看） */
+export function fmtStamp(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 export const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
 
 export function initials(name: string | null | undefined): string {

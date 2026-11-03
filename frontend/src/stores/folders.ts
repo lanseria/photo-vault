@@ -1,21 +1,24 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { api, errorText } from '@/api'
-import type { MaterialFolder } from '@/types'
+import type { Folder, Library } from '@/types'
 import { useToastStore } from './toast'
 
 /**
- * 素材库文件夹。
+ * 文件夹（按库区分：图库 / 素材库各一套）。
  *
- * 文件夹是素材库里用户手动整理的维度：数量少（几十个量级）、无分页需求，
+ * 文件夹是用户手动整理的维度：数量少（几十个量级）、无分页需求，
  * 所以一次性全量拉取；素材的增删只影响 count/cover，重新 load 一次就够。
+ * store 保存「当前库」的一份列表：load / create 都带 library，换库自动重拉。
  */
 export const useFoldersStore = defineStore('folders', () => {
-  const folders = ref<MaterialFolder[]>([])
-  /** 未归入任何文件夹的素材数 */
+  const library = ref<Library>('material')
+  const folders = ref<Folder[]>([])
+  /** 当前库里未归入任何文件夹的素材数 */
   const unfiled = ref(0)
   const loading = ref(false)
-  const loaded = ref(false)
+  /** 已完成过加载的库；换了库再 load 会自动重拉 */
+  const loaded = ref<Library | null>(null)
 
   const byId = computed(() => new Map(folders.value.map(f => [f.id, f])))
 
@@ -23,24 +26,31 @@ export const useFoldersStore = defineStore('folders', () => {
     return (id && byId.value.get(id)?.name) || ''
   }
 
-  async function load(force = false) {
+  async function load(lib: Library, force = false) {
     if (loading.value) return
-    if (loaded.value && !force) return
+    if (!force && loaded.value === lib && library.value === lib) return
+    library.value = lib
     loading.value = true
     try {
-      const res = await api.folders()
+      const res = await api.folders(lib)
       folders.value = res.folders
       unfiled.value = res.unfiled
-      loaded.value = true
+      loaded.value = lib
     } finally {
       loading.value = false
     }
   }
 
-  async function create(name: string): Promise<MaterialFolder | null> {
+  async function create(name: string, lib: Library): Promise<Folder | null> {
+    if (library.value !== lib) {
+      // 换库后旧列表不能留：先把视图切干净，新文件夹才有地方放
+      library.value = lib
+      folders.value = []
+    }
     try {
-      const folder = await api.createFolder(name)
+      const folder = await api.createFolder(name, lib)
       folders.value = [folder, ...folders.value]
+      loaded.value = lib
       return folder
     } catch (e) {
       useToastStore().show('创建失败：' + errorText(e).slice(0, 60))
@@ -70,5 +80,5 @@ export const useFoldersStore = defineStore('folders', () => {
     return true
   }
 
-  return { folders, unfiled, loading, loaded, byId, nameOf, load, create, rename, remove }
+  return { library, folders, unfiled, loading, loaded, byId, nameOf, load, create, rename, remove }
 })

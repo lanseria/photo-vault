@@ -98,9 +98,11 @@ export interface BinItems {
   items: Asset[]
 }
 
-export interface MaterialFolder {
+/** 文件夹：图库和素材库各有自己的一套（library 区分） */
+export interface Folder {
   id: string
   name: string
+  library: Library
   count: number
   /** 封面缩略图 URL（文件夹里最新一条素材）；空文件夹为 null */
   cover: string | null
@@ -109,9 +111,65 @@ export interface MaterialFolder {
 }
 
 export interface FolderList {
-  folders: MaterialFolder[]
-  /** 未归入任何文件夹的素材数 */
+  folders: Folder[]
+  /** 本库里未归入任何文件夹的素材数 */
   unfiled: number
+}
+
+/** 灯箱「详细信息」面板：/api/assets/{id}/info 的响应 */
+export interface AssetInfoSource {
+  kind: string | null
+  label: string | null
+  root: string | null
+}
+
+export interface AssetInfoDevice {
+  make: string | null
+  model_raw: string
+  model_canonical: string | null
+  kind: string | null
+}
+
+export interface AssetInfoExif {
+  iso: number | null
+  aperture: number | null
+  /** 快门秒数，如 0.004 = 1/250s */
+  shutter: number | null
+  focal_mm: number | null
+  orientation: number | null
+}
+
+export interface AssetInfo {
+  id: string
+  kind: AssetKind
+  library: Library
+  /** 拍摄时间（本地时区不带偏移） */
+  taken: string | null
+  tz_offset_min: number | null
+  /** exif | gps | default | user */
+  tz_source: string | null
+  /** 同步时间：这份文件进库的时间 */
+  synced_at: string | null
+  /** 入库时间：资产首次登记的时间 */
+  added_at: string | null
+  /** 原始地址：导入时文件在来源里的路径（已映射成宿主机路径给人看） */
+  src_path: string | null
+  /** 库内位置：内容寻址的相对路径 */
+  origin_rel: string
+  source: AssetInfoSource | null
+  ext: string | null
+  mime: string | null
+  bytes: number
+  raw_ext: string
+  raw_bytes: number
+  width: number | null
+  height: number | null
+  duration_ms: number | null
+  sha: string
+  device: AssetInfoDevice | null
+  lens: string | null
+  exif: AssetInfoExif | null
+  gps: { lon: number; lat: number } | null
 }
 
 export interface Face {

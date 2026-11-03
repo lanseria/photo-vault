@@ -1,5 +1,6 @@
 import type {
   Asset,
+  AssetInfo,
   AssetPage,
   BinList,
   BinItems,
@@ -9,9 +10,10 @@ import type {
   Device,
   DeviceList,
   Face,
+  Folder,
   FolderList,
   ImportRun,
-  MaterialFolder,
+  Library,
   Person,
   PersonList,
   Stats,
@@ -87,7 +89,7 @@ export interface AssetQuery {
   min_px?: number
   /** 设备 id 字符串，或 'unknown' = 未识别设备 */
   device?: string
-  /** 素材库文件夹 id，或 'none' = 未整理 */
+  /** 文件夹 id（任意库），或 'none' = 未整理 */
   folder?: string
 }
 
@@ -96,6 +98,8 @@ export const api = {
 
   assets: (params: AssetQuery) => request<AssetPage>(`/api/assets${queryString({ ...params })}`),
   asset: (id: string) => request<Asset>(`/api/assets/${id}`),
+  /** 灯箱详细信息面板：拍摄/同步/来源/EXIF/GPS 一次给全 */
+  info: (id: string) => request<AssetInfo>(`/api/assets/${id}/info`),
 
   analyze: (ids: string[]) =>
     request<{ queued: number; by_kind: Record<string, number> }>(
@@ -190,13 +194,13 @@ export const api = {
   deliverBin: (id: string, mode: 'link' | 'copy' = 'link') =>
     request<DeliverResult>(`/api/bins/${id}/deliver`, jsonBody('POST', { mode })),
 
-  folders: () => request<FolderList>('/api/material/folders'),
-  createFolder: (name: string) =>
-    request<MaterialFolder>('/api/material/folders', jsonBody('POST', { name })),
+  folders: (library: Library) => request<FolderList>(`/api/folders?library=${library}`),
+  createFolder: (name: string, library: Library) =>
+    request<Folder>('/api/folders', jsonBody('POST', { name, library })),
   renameFolder: (id: string, name: string) =>
-    request<MaterialFolder>(`/api/material/folders/${id}`, jsonBody('PATCH', { name })),
+    request<Folder>(`/api/folders/${id}`, jsonBody('PATCH', { name })),
   deleteFolder: (id: string) =>
-    request<{ deleted: number }>(`/api/material/folders/${id}`, { method: 'DELETE' }),
+    request<{ deleted: number }>(`/api/folders/${id}`, { method: 'DELETE' }),
 
   cinema: (q = '') =>
     request<CinemaList>(`/api/cinema${q ? `?q=${encodeURIComponent(q)}` : ''}`),
