@@ -572,7 +572,8 @@ uv run photo-vault ingest D:\素材 --mode copy --library material
 [`ios/README.md`](ios/README.md)。
 
 - **同步**：PhotoKit 原件导出（HEIC/JPG/MOV…）、Live Photo 自动配对（同 `batch`、同 stem、
-  先静帧后动态）、增量账本 + 服务器索引对账（重装 App 也不会把几万张重传一遍）、
+  先静帧后动态）、增量账本；默认直接上传不检索（服务端按 sha256 去重兜底），可选打开
+  「同步前先检索服务器」跳过库里已有（重装 App 也不会把几万张重传一遍）、
   断点与失败重试、后台上传（URLSession 后台会话 + BGProcessingTask）、实时进度/速度/ETA。
 - **地址**：默认 `http://bmc_desktop:7878`；单段主机名解析不到时自动再试 `bmc_desktop.local`，
   也可以直接填局域网 IP。

@@ -317,8 +317,10 @@ struct SyncOptions: Codable, Equatable, Sendable {
     var includeHidden = false
     /// iCloud 上还没下载的原件，允许 App 拉下来再上传
     var allowICloudDownload = true
-    /// 首次同步前先拉服务器索引：已经在服务器上的不再重复上传
-    var skipExistingOnServer = true
+    /// 同步前先拉服务器索引、跳过服务器上已有的内容。默认关：直接上传，
+    /// 服务端按 sha256 内容去重兜底，本机账本也会挡住已同步项。
+    /// 换机 / 重装 App（账本丢了）后的首次整库同步建议打开。
+    var skipExistingOnServer = false
     /// 并发上传数（局域网 2~3 比较稳）
     var concurrentUploads = 2
     /// 只同步这个时间之后拍的东西；nil = 全部

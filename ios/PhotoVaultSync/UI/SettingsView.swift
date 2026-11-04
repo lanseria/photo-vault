@@ -217,7 +217,14 @@ private struct SyncOptionsCard: View {
                 divider
                 toggleRow("允许从 iCloud 下载原件", binding(\.allowICloudDownload))
                 divider
-                toggleRow("跳过服务器已有的照片", binding(\.skipExistingOnServer))
+                toggleRow("同步前先检索服务器", binding(\.skipExistingOnServer))
+                Text(settings.options.skipExistingOnServer
+                     ? "已打开：同步前先翻页拉取服务器索引，库里已有的直接跳过。适合换机 / 重装 App 后的首次整库同步。"
+                     : "已关闭（默认）：点开始就直接扫描并上传，不做检索；重复内容由服务端按内容去重。")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 2)
+                    .fixedSize(horizontal: false, vertical: true)
                 divider
 
                 Stepper(value: binding(\.concurrentUploads), in: 1...4) {
@@ -249,7 +256,7 @@ private struct SyncOptionsCard: View {
                         .tint(Theme.accent)
                 }
 
-                Text("上传的是原始文件；服务器按内容去重，重复的会记为「跳过」，不会改动本机相册。")
+                Text("上传的是原始文件，不会改动本机相册；默认直接上传，服务端按内容去重，重复的记为「跳过」。")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .padding(.top, 8)

@@ -727,7 +727,7 @@ private struct FilterSummaryCard: View {
                         VaultChip(icon: "calendar", text: dateText)
                         VaultChip(icon: "externaldrive", text: "→ \(settings.libraryTitle)")
                         VaultChip(icon: "forward.fill",
-                                  text: settings.options.skipExistingOnServer ? "跳过已有" : "全量上传")
+                                  text: settings.options.skipExistingOnServer ? "检索后跳过已有" : "直接上传")
                         VaultChip(icon: "square.stack.3d.up",
                                   text: "\(settings.options.concurrentUploads) 路并发")
                         if settings.options.includeHidden {

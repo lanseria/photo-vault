@@ -367,7 +367,9 @@ final class SyncEngine {
             }
         }
 
-        // 2) 服务器索引对账（服务器上已有的一律跳过，2 万张相册这是必须的）
+        // 2) 服务器索引对账（可选，默认关）：开着才翻页拉索引，服务器上已有的一律跳过。
+        //    默认直接上传——服务端按 sha256 去重兜底，本机账本挡住已同步项；
+        //    换机 / 重装 App 后的首次整库同步建议在设置里打开。
         var serverIndex: ServerIndex?
         if settings.options.skipExistingOnServer, case .full = scope {
             state.message = "正在核对服务器已有索引…"
