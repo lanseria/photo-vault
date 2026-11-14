@@ -1278,6 +1278,79 @@ def api_folder_delete(folder_id: str) -> JSONResponse:
     return JSONResponse({"deleted": n})
 
 
+# ---------------------------------------------------------------- 人脸队列控制
+# web 只负责入队和启停标记：真正的提取在宿主机 worker 里跑（ml.worker）。
+# 暂停 = ml_meta.faces_paused='1'，worker 每次认领前检查——正在跑的批次收尾后
+# 不再取新任务，pending 全部原样保留，继续时接着跑。聚类由 worker 在队列清空后自动做。
+
+_FACES_QUEUE_SQL = """
+insert into jobs (kind, payload)
+select 'faces', jsonb_build_object('asset_id', a.id::text)
+from assets a
+where not a.is_deleted and a.library = 'gallery'
+  and not exists (
+    select 1 from jobs j
+    where j.kind = 'faces' and j.state in ('pending', 'running', 'ok')
+      and j.payload->>'asset_id' = a.id::text
+  )
+"""
+
+_SET_FACES_PAUSED_SQL = """
+insert into ml_meta (key, value, updated_at) values ('faces_paused', %s, now())
+on conflict (key) do update set value = excluded.value, updated_at = now()
+"""
+
+
+@app.get("/api/faces/queue")
+def api_faces_queue() -> JSONResponse:
+    paused = q("select value from ml_meta where key = 'faces_paused'")
+    by_state = {r["state"]: r["c"] for r in q(
+        "select state, count(*) c from jobs where kind = 'faces' group by state")}
+    # 进度按「图库资产里已有 ok 任务的」算：素材库不跑人脸，dead 允许重排不算完成
+    total = q("select count(*) c from assets "
+              "where not is_deleted and library = 'gallery'")[0]["c"]
+    done = q("""select count(*) c from assets a
+                where not a.is_deleted and a.library = 'gallery'
+                  and exists (select 1 from jobs j
+                               where j.kind = 'faces' and j.state = 'ok'
+                                 and j.payload->>'asset_id' = a.id::text)""")[0]["c"]
+    return JSONResponse({
+        "paused": bool(paused and paused[0]["value"] == "1"),
+        "pending": by_state.get("pending", 0),
+        "running": by_state.get("running", 0),
+        "ok": by_state.get("ok", 0),
+        "failed": by_state.get("failed", 0) + by_state.get("dead", 0),
+        "assets_total": total,
+        "assets_done": done,
+    })
+
+
+@app.post("/api/faces/queue/run")
+def api_faces_run() -> JSONResponse:
+    """全量入队（幂等：已排队 / 已完成的资产不重复），顺带清掉暂停标记。
+
+    重复点「开始识别」不会把队列撑大；dead 任务不拦着重新入队（换模型重跑的场景）。
+    """
+    assert pool is not None
+    with pool.connection() as conn:
+        cur = conn.execute(_FACES_QUEUE_SQL)
+        conn.execute(_SET_FACES_PAUSED_SQL, ("0",))
+        queued = cur.rowcount
+    return JSONResponse({"queued": queued})
+
+
+class FacesPauseBody(BaseModel):
+    paused: bool
+
+
+@app.post("/api/faces/queue/pause")
+def api_faces_pause(body: FacesPauseBody) -> JSONResponse:
+    assert pool is not None
+    with pool.connection() as conn:
+        conn.execute(_SET_FACES_PAUSED_SQL, ("1" if body.paused else "0",))
+    return JSONResponse({"paused": body.paused})
+
+
 # ---------------------------------------------------------------- 人物 / 人脸
 
 def _clean_person_name(name: str) -> str:

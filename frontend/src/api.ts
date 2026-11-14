@@ -10,6 +10,7 @@ import type {
   Device,
   DeviceList,
   Face,
+  FaceQueue,
   Folder,
   FolderList,
   ImportRun,
@@ -163,6 +164,16 @@ export const api = {
     request<{ updated: number; device_id: number | null }>(
       '/api/devices/assign',
       jsonBody('POST', { ids, device_id: deviceId }),
+    ),
+
+  /** 人脸任务队列：网页只管入队 / 启停 / 看进度，提取在宿主机 worker 里跑 */
+  facesQueue: () => request<FaceQueue>('/api/faces/queue'),
+  runFaces: () =>
+    request<{ queued: number }>('/api/faces/queue/run', jsonBody('POST', {})),
+  pauseFaces: (paused: boolean) =>
+    request<{ paused: boolean }>(
+      '/api/faces/queue/pause',
+      jsonBody('POST', { paused }),
     ),
 
   persons: () => request<PersonList>('/api/persons'),

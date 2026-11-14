@@ -4,16 +4,23 @@ import { useRouter } from 'vue-router'
 import { useChromeStore } from '@/stores/chrome'
 import { usePeopleStore } from '@/stores/people'
 import { initials } from '@/utils/format'
+import FaceQueueControl from '@/components/FaceQueueControl.vue'
 
 const router = useRouter()
 const people = usePeopleStore()
 const chrome = useChromeStore()
 
-onMounted(async () => {
-  chrome.set({ title: '人物', count: '' })
+async function refreshPeople() {
   await people.load(true)
   chrome.set({ count: people.persons.length ? `${people.persons.length} 人` : '' })
-})
+}
+
+onMounted(refreshPeople)
+
+// 「开始识别」的队列跑完（worker 已自动聚类）→ 重载人物列表
+function onQueueDrained() {
+  void refreshPeople()
+}
 
 function hideBrokenImage(event: Event) {
   ;(event.target as HTMLImageElement).style.display = 'none'
@@ -26,6 +33,8 @@ function open(id: string) {
 
 <template>
   <main class="pb-[120px]">
+    <FaceQueueControl @drained="onQueueDrained" />
+
     <div v-if="people.persons.length" class="grid grid-cols-[repeat(auto-fill,minmax(112px,1fr))] gap-x-2 gap-y-4 px-4 py-4">
       <button
         v-for="person in people.persons"
@@ -53,17 +62,14 @@ function open(id: string) {
 
     <div
       v-else-if="!people.loading"
-      class="px-6 py-20 text-center text-[14px] leading-loose text-mut"
+      class="px-6 py-16 text-center text-[14px] leading-loose text-mut"
     >
-      还没有识别出人物。{{ '\n\n' }}
-      先跑
-      <code class="rounded bg-panel px-1.5 py-0.5">ml.enqueue --kind faces</code>
-      入队、
-      <code class="rounded bg-panel px-1.5 py-0.5">ml.worker --task faces</code>
-      提取，{{ '\n' }}
-      再跑 <code class="rounded bg-panel px-1.5 py-0.5">ml.cluster</code> 聚类。
+      还没有识别出人物。{{ '\n' }}点上方「开始识别」全量入队，
+      {{ '\n' }}宿主机 worker（<code class="rounded bg-panel px-1.5 py-0.5">ml.worker</code>）
+      提取完会自动聚类成人物。
       <template v-if="people.unassigned">
-        {{ '\n\n' }}当前有 {{ people.unassigned }} 张未归类的人脸。
+        {{ '\n\n' }}当前有 {{ people.unassigned }} 张未归类的人脸，
+        {{ '\n' }}补跑聚类可把它们归进人物。
       </template>
     </div>
 

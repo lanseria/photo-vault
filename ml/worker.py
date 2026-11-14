@@ -11,7 +11,10 @@ r"""ML worker：jobs 队列消费（RAM++ 打标 + InsightFace 人脸 + Qwen3-VL
 - 写回：打标 → asset_tags(source='ai')；人脸 → faces（先删后插）+ derived/faces 裁剪；
   视频 → video_frames + video_summaries + asset_tags(source='vlm') + derived/keyframes
 - 失败重试：attempts>=3 → dead
-- 人脸任务之后要跑 `python -m ml.cluster` 才会出现"人物"
+- 人脸暂停：ml_meta.faces_paused='1'（网页「暂停」按钮设置）时跳过 faces 认领，
+  正在跑的批次收尾，pending 原样保留；网页「继续」清标记后接着跑
+- 人脸聚类：faces 队列清空且未暂停时自动跑 cluster，网页点「开始识别」即可长出人物，
+  不再需要手动 `python -m ml.cluster`
 - 视频任务需要 models/qwen3-vl-4b/（python -m ml.vlm --download），缺了就跳过 video，
   不影响另外两类
 """
@@ -27,6 +30,7 @@ from psycopg.rows import dict_row
 
 from vault.config import Config
 
+from . import cluster as cluster_lib
 from . import keyframes, vlm as vlmlib
 from .faces import FACE_MODEL_ID, FaceEngine, load_rgb, save_crop
 from .model import TAGGER_MODEL_ID, RamTagger, load_image
@@ -341,6 +345,31 @@ class Models:
             self.vlm = None
 
 
+def _faces_paused(conn) -> bool:
+    """网页「暂停人脸」标记（ml_meta.faces_paused），每次认领前检查。"""
+    row = conn.execute("select value from ml_meta where key = 'faces_paused'").fetchone()
+    return bool(row and row["value"] == "1")
+
+
+def _cluster_if_drained(conn) -> None:
+    """faces 队列清空且未暂停时自动聚类——「开始识别」按钮的最后一环。"""
+    if _faces_paused(conn):
+        return
+    left = conn.execute(
+        "select count(*) c from jobs where kind = 'faces' and state = 'pending'"
+    ).fetchone()["c"]
+    if left:
+        return
+    t0 = time.time()
+    try:
+        cluster_lib.run(conn)
+        conn.commit()
+        print(f"[worker] 人脸聚类完成 ({time.time() - t0:.1f}s)", flush=True)
+    except Exception as exc:
+        conn.rollback()
+        print(f"[worker] 人脸聚类失败: {type(exc).__name__}: {exc}", flush=True)
+
+
 def run_worker(kinds: list[str], once: bool = False,
                max_jobs: int | None = None) -> None:
     cfg = Config.load()
@@ -368,21 +397,33 @@ def _loop(models: Models, cfg: Config, kinds: list[str], once: bool,
 
     idle = 0
     done = 0
+    pause_logged = False
     while True:
         if max_jobs and done >= max_jobs:
             print(f"[worker] 已处理 {done} 个，--max 退出", flush=True)
             return
         with psycopg.connect(cfg.database_url, row_factory=dict_row) as conn:
-            rows = conn.execute(CLAIM_SQL, (kinds, batch, worker)).fetchall()
+            # 网页点了「暂停」就不再认领 faces；打标 / 视频不受影响
+            active = kinds
+            if "faces" in active and _faces_paused(conn):
+                active = [k for k in kinds if k != "faces"]
+                if not active and once:
+                    print("[worker] faces 已暂停，--once 退出", flush=True)
+                    return
+            rows = conn.execute(CLAIM_SQL, (active, batch, worker)).fetchall()
             conn.commit()
             if not rows:
                 conn.close()
                 if once:
                     print("[worker] 队列已清空，--once 退出", flush=True)
                     return
+                if not active and not pause_logged:
+                    print("[worker] faces 已暂停（网页可继续），待命中…", flush=True)
+                    pause_logged = True
                 idle += 1
                 time.sleep(min(2 + idle, 8))
                 continue
+            pause_logged = False
             idle = 0
             groups: dict[str, list[dict]] = {}
             for r in rows:
@@ -406,6 +447,8 @@ def _loop(models: Models, cfg: Config, kinds: list[str], once: bool,
             print(f"[worker] 处理 {len(rows)} 个 " +
                   ", ".join(f"{k}×{len(v)}" for k, v in groups.items()), flush=True)
             done += len(rows)
+            if "faces" in groups:
+                _cluster_if_drained(conn)
 
 
 def main(argv: list[str] | None = None) -> int:

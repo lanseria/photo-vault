@@ -290,6 +290,11 @@ uv run --group ml python -m ml.cluster
 `ml.worker --task` 可切 `tags` / `faces` / `all`（默认）；`--once` 清空队列后退出，适合计划任务。
 视频用海报帧（`faces.source='poster'`），HEIC 直接解原件。
 
+> **网页按钮**：人物页顶部有人脸识别控件——「开始识别」（全量幂等入队，等价于①）、
+> 暂停 / 继续、进度条。暂停是 `ml_meta.faces_paused` 标记，worker 认领前检查，
+> 正在跑的批次收尾、pending 原样保留；faces 队列清空且未暂停时 worker 自动跑③，
+> 所以网页点一下就能长出人物，平时只需要保证 worker（②）在跑。
+
 ### 聚类规则：匿名 + 手动命名
 
 1. **认领**：未归类的人脸先跟已有人物比最近邻，相似度 ≥ 0.45 就挂过去——每天新导入的照片

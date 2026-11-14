@@ -75,6 +75,17 @@ export interface PersonList {
   unassigned_faces: number
 }
 
+/** 人脸任务队列（/api/faces/queue）：worker 在宿主机跑，网页只管启停和看进度 */
+export interface FaceQueue {
+  paused: boolean
+  pending: number
+  running: number
+  ok: number
+  failed: number
+  assets_total: number
+  assets_done: number
+}
+
 export interface TagCount {
   id: number | string
   name: string
