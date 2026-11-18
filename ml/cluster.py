@@ -34,7 +34,7 @@ select f.id, f.asset_id, f.det_score, f.quality, f.created_at,
        f.embedding::text as emb
 from faces f
 join assets a on a.id = f.asset_id
-where f.person_id is null and not a.is_deleted
+where f.person_id is null and not a.is_deleted and not f.ignored
   and f.det_score >= %s and coalesce(f.quality, 0) >= %s
 order by f.created_at, f.id
 """
@@ -42,7 +42,7 @@ order by f.created_at, f.id
 MATCH_SQL = """
 select f.person_id, 1 - (f.embedding <=> %s::vector) as sim
 from faces f
-where f.person_id is not null
+where f.person_id is not null and not f.ignored
 order by f.embedding <=> %s::vector
 limit 1
 """
@@ -50,7 +50,7 @@ limit 1
 NEIGHBORS_SQL = """
 select f.id, 1 - (f.embedding <=> %s::vector) as sim
 from faces f
-where f.person_id is null
+where f.person_id is null and not f.ignored
   and f.id <> %s::uuid
   and f.det_score >= %s and coalesce(f.quality, 0) >= %s
 order by f.embedding <=> %s::vector
@@ -61,11 +61,13 @@ COVER_SQL = """
 update persons p
    set cover_face_id = (
          select f.id from faces f
-          where f.person_id = p.id
+          where f.person_id = p.id and not f.ignored
           order by coalesce(f.quality, 0) desc, f.det_score desc
           limit 1)
  where p.cover_face_id is null
-    or not exists (select 1 from faces c where c.id = p.cover_face_id)
+    or not exists (select 1 from faces c where c.id = p.cover_face_id
+                   and c.person_id = p.id)
+    or exists (select 1 from faces c where c.id = p.cover_face_id and c.ignored)
 """
 
 
@@ -252,7 +254,8 @@ def _finalize(conn, dry_run: bool, stats: dict) -> None:
         conn.execute(COVER_SQL)
         removed = conn.execute(
             """delete from persons p
-               where not exists (select 1 from faces f where f.person_id = p.id)"""
+               where not exists (select 1 from faces f where f.person_id = p.id
+                                 and not f.ignored)"""
         ).rowcount
     if removed:
         print(f"   清理空人物 {removed} 个")

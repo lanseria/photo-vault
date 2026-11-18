@@ -66,6 +66,10 @@ export interface Person {
   id: string
   name: string
   cover: string | null
+  /** true = 用了上传的自定义封面（/covers/{id}.jpg），false = 系统挑的人脸裁剪 */
+  custom_cover?: boolean
+  /** true = 备用封面（/covers/{id}.jpg?slot=2）已上传；主封面缺失时顶上 */
+  backup_cover?: boolean
   n_faces: number
   n_assets: number
 }
@@ -189,6 +193,38 @@ export interface Face {
   person: string
   bbox: [number, number, number, number]
   det_score: number
+  /** true = 用户已忽略（误检/杂物），UI 里不再展示 */
+  ignored?: boolean
+}
+
+/** /api/persons/{id}/faces：「人脸」抽屉里的一张脸 */
+export interface PersonFace {
+  id: string
+  asset_id: string
+  ignored: boolean
+  det_score: number
+  quality: number | null
+  taken: string | null
+  /** 照片 / 视频 / raw…（hover 预览区分播放方式） */
+  kind?: string
+  /** 原件内容 sha → /thumbs/{sha}.webp 海报 */
+  sha?: string | null
+}
+
+/** 忽略/恢复人脸的响应：person 为人物最新状态（person_removed=true 时人物已不存在） */
+export interface FaceMutateResult {
+  ignored?: number
+  restored?: number
+  person?: Person
+  person_removed?: boolean
+  id?: string
+}
+
+/** 移动人脸的响应：from / into 为两边人物的最新状态 */
+export interface FaceMoveResult {
+  moved: number
+  from: Person
+  into: Person
 }
 
 export interface VideoFrame {

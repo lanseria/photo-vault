@@ -16,6 +16,7 @@ import { readScroll, restoreScroll, scrollKey } from '@/composables/scrollMemory
 import PhotoCell from '@/components/PhotoCell.vue'
 import PhotoLightbox from '@/components/PhotoLightbox.vue'
 import TimelineScrubber from '@/components/TimelineScrubber.vue'
+import PersonCoverHeader from '@/components/PersonCoverHeader.vue'
 import { setAssetDragData } from '@/utils/dnd'
 
 /**
@@ -313,6 +314,8 @@ function onKeydown(event: KeyboardEvent) {
 
 <template>
   <main class="pb-[120px]">
+    <PersonCoverHeader v-if="cfg.kind === 'person' && cfg.personId" :person-id="cfg.personId" />
+
     <div
       v-for="section in feed.sections"
       :key="section.key"

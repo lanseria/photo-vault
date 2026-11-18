@@ -1,14 +1,19 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useChromeStore } from '@/stores/chrome'
 import { usePeopleStore } from '@/stores/people'
 import { initials } from '@/utils/format'
+import type { Person } from '@/types'
 import FaceQueueControl from '@/components/FaceQueueControl.vue'
+import PersonFacesSheet from '@/components/PersonFacesSheet.vue'
 
 const router = useRouter()
 const people = usePeopleStore()
 const chrome = useChromeStore()
+
+/** 右键人物卡片直达「人脸」抽屉（忽略误检脸）；详情页顶部也有入口 */
+const facesPerson = ref<Person | null>(null)
 
 async function refreshPeople() {
   await people.load(true)
@@ -29,6 +34,10 @@ function hideBrokenImage(event: Event) {
 function open(id: string) {
   void router.push(`/people/${id}`)
 }
+
+function onFacesChanged() {
+  void refreshPeople()
+}
 </script>
 
 <template>
@@ -40,15 +49,17 @@ function open(id: string) {
         v-for="person in people.persons"
         :key="person.id"
         class="flex flex-col items-center gap-[7px]"
+        title="点击打开 · 右键管理人脸"
         @click="open(person.id)"
+        @contextmenu.prevent="person.n_faces && (facesPerson = person)"
       >
         <div
           class="relative flex h-[86px] w-[86px] items-center justify-center overflow-hidden rounded-full bg-panel2 text-[30px] font-semibold text-mut"
         >
           <span>{{ initials(person.name) }}</span>
           <img
-            v-if="person.cover"
-            :src="`/faces/${person.cover}.jpg`"
+            v-if="people.coverSrc(person)"
+            :src="people.coverSrc(person)"
             alt=""
             loading="lazy"
             class="absolute inset-0 h-full w-full object-cover"
@@ -74,5 +85,13 @@ function open(id: string) {
     </div>
 
     <div v-else class="spinner" />
+
+    <PersonFacesSheet
+      v-if="facesPerson"
+      :person-id="facesPerson.id"
+      :person-name="facesPerson.name"
+      @close="facesPerson = null"
+      @changed="onFacesChanged"
+    />
   </main>
 </template>

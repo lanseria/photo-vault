@@ -11,11 +11,14 @@ import type {
   DeviceList,
   Face,
   FaceQueue,
+  FaceMutateResult,
+  FaceMoveResult,
   Folder,
   FolderList,
   ImportRun,
   Library,
   Person,
+  PersonFace,
   PersonList,
   Stats,
   TagCount,
@@ -186,6 +189,31 @@ export const api = {
     ),
   dissolvePerson: (id: string) =>
     request<{ id: string; faces: number }>(`/api/persons/${id}`, { method: 'DELETE' }),
+  /** 上传人物封面：原始字节流（和 /api/upload 一个路数），服务端裁方压缩。
+   *  slot=1 主封面、slot=2 备用封面 */
+  uploadPersonCover: (id: string, file: File, slot: 1 | 2 = 1) =>
+    request<Person>(`/api/persons/${id}/cover${slot === 2 ? '?slot=2' : ''}`, {
+      method: 'POST',
+      headers: { 'Content-Type': file.type || 'application/octet-stream' },
+      body: file,
+    }),
+  /** 删掉某一张自定义封面，回退到系统挑的人脸裁剪 */
+  resetPersonCover: (id: string, slot: 1 | 2 = 1) =>
+    request<Person>(`/api/persons/${id}/cover${slot === 2 ? '?slot=2' : ''}`, {
+      method: 'DELETE',
+    }),
+
+  /** 人物的全部脸（「人脸」抽屉）：已忽略的排后面 */
+  personFaces: (id: string) => request<{ faces: PersonFace[] }>(`/api/persons/${id}/faces`),
+  /** 忽略人脸：标记 + 记住 embedding 规则，重跑识别不再收回 */
+  ignorePersonFaces: (id: string, ids: string[]) =>
+    request<FaceMutateResult>(`/api/persons/${id}/faces/ignore`, jsonBody('POST', { ids })),
+  /** 恢复被忽略的人脸（同时删掉忽略规则） */
+  restorePersonFaces: (id: string, ids: string[]) =>
+    request<FaceMutateResult>(`/api/persons/${id}/faces/restore`, jsonBody('POST', { ids })),
+  /** 把若干脸移到另一个人物（聚类纠错） */
+  movePersonFaces: (id: string, ids: string[], into: string) =>
+    request<FaceMoveResult>(`/api/persons/${id}/faces/move`, jsonBody('POST', { ids, into })),
 
   bins: () => request<BinList>('/api/bins'),
   createBin: (name: string) =>

@@ -51,6 +51,7 @@ class Config:
         self.landing_root.mkdir(parents=True, exist_ok=True)
         (self.derived_root / "thumbs").mkdir(parents=True, exist_ok=True)
         (self.derived_root / "media").mkdir(parents=True, exist_ok=True)
+        (self.derived_root / "person_covers").mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------ 影视库路径
     # 库里的影视只记 (root_key, rel_path)，不记绝对路径：

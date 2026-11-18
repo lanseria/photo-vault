@@ -51,5 +51,31 @@ export const usePeopleStore = defineStore('people', () => {
     loaded.value = false
   }
 
-  return { persons, unassigned, loading, loaded, byId, nameOf, load, rename, merge, dissolve }
+  /** 列表/详情共用的封面地址：自定义封面优先，没有就回退系统挑的人脸裁剪。
+   *  slot=2 取备用封面（没传返回 ''）。bust 换个查询参数绕开旧缓存。 */
+  function coverSrc(p: Person, bust = 0, slot: 1 | 2 = 1): string {
+    const q = `slot=${slot}${bust ? `&v=${bust}` : ''}`
+    if (slot === 2) return p.backup_cover ? `/covers/${p.id}.jpg?${q}` : ''
+    if (p.custom_cover) return `/covers/${p.id}.jpg?${q}`
+    return p.cover ? `/faces/${p.cover}.jpg` : ''
+  }
+
+  function applyPerson(person: Person) {
+    const hit = persons.value.find(p => p.id === person.id)
+    if (hit) Object.assign(hit, person)
+    else persons.value.push(person)
+  }
+
+  async function setCover(id: string, file: File, slot: 1 | 2 = 1) {
+    applyPerson(await api.uploadPersonCover(id, file, slot))
+  }
+
+  async function resetCover(id: string, slot: 1 | 2 = 1) {
+    applyPerson(await api.resetPersonCover(id, slot))
+  }
+
+  return {
+    persons, unassigned, loading, loaded, byId, nameOf,
+    load, rename, merge, dissolve, coverSrc, setCover, resetCover,
+  }
 })

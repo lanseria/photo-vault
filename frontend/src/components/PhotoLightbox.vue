@@ -171,7 +171,8 @@ async function loadExtras() {
   api
     .faces(id)
     .then(res => {
-      if (props.asset.id === id) faces.value = res.faces
+      // 已忽略的脸（误检）不再展示
+      if (props.asset.id === id) faces.value = res.faces.filter(f => !f.ignored)
     })
     .catch(() => undefined)
 

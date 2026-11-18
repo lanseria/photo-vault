@@ -74,6 +74,16 @@ values (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s::vector, %s)
 returning id
 """
 
+# 网页上被忽略的脸按 embedding 记了规则（ignored_faces，见 db/017_ignore_faces.sql）；
+# 重跑识别产生的新脸（face_id 变了）跟规则比对，同余弦相似度阈值，两边保持一致
+IGNORE_SIM = 0.8
+
+IGNORE_MATCH_SQL = """
+select 1 from ignored_faces
+where 1 - (embedding <=> %s::vector) >= %s
+limit 1
+"""
+
 
 def finish(conn, job_id: int, ok: bool, err: str | None = None):
     conn.execute(
@@ -174,22 +184,33 @@ def faces_batch(conn, engine: FaceEngine, cfg, jobs: list[dict]) -> None:
                 stale = [r["id"] for r in conn.execute(
                     "delete from faces where asset_id = %s::uuid returning id",
                     (asset_id,))]
-                created: list[tuple[str, object]] = []
+                created: list[tuple[str, object, bool]] = []
                 for face in detected:
                     x1, y1, x2, y2 = face.bbox
+                    vec = to_vector(face.embedding)
                     fid = conn.execute(FACE_INSERT_SQL, (
                         asset_id, x1, y1, x2, y2, face.det_score, face.quality,
-                        source, to_vector(face.embedding), FACE_MODEL_ID,
+                        source, vec, FACE_MODEL_ID,
                     )).fetchone()["id"]
-                    created.append((str(fid), face.crop))
+                    # 命中忽略规则的脸直接压下去（裁剪图照存，网页里可恢复）
+                    hit = conn.execute(IGNORE_MATCH_SQL, (vec, IGNORE_SIM)).fetchone()
+                    if hit:
+                        conn.execute("update faces set ignored = true "
+                                     "where id = %s::uuid", (fid,))
+                    created.append((str(fid), face.crop, bool(hit)))
+                auto_ignored = sum(1 for _, _, hit in created if hit)
             finish(conn, job["id"], True)
         except Exception as exc:
             conn.rollback()
             finish(conn, job["id"], False, f"{type(exc).__name__}: {exc}")
             continue
 
+        if auto_ignored:
+            print(f"[worker] {asset_id[:8]} 自动忽略 {auto_ignored} 张匹配规则的脸",
+                  flush=True)
+
         # 文件写在事务外：写盘失败不该让整条记录回滚（头像可以下次重生成）
-        for fid, crop in created:
+        for fid, crop, _hit in created:
             try:
                 save_crop(crop, faces_dir / f"{fid}.jpg")
             except Exception as exc:

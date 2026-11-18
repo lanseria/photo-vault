@@ -171,7 +171,8 @@ def api_stats() -> JSONResponse:
              (select count(*) from assets where favorite and not is_deleted) favs,
              (select count(*) from assets where is_deleted) trash,
              (select count(*) from persons p
-               where exists (select 1 from faces f where f.person_id = p.id)) people,
+               where exists (select 1 from faces f where f.person_id = p.id
+                             and not f.ignored)) people,
              (select coalesce(sum(bytes),0) from files
                where role in ('original', 'raw')) b,
              (select coalesce(sum(f.bytes),0) from files f join assets a on a.id=f.asset_id
@@ -260,7 +261,7 @@ def api_assets(
     if person_id:
         where.append(
             "exists (select 1 from faces fp where fp.asset_id=a.id "
-            "and fp.person_id=%s::uuid)"
+            "and fp.person_id=%s::uuid and not fp.ignored)"
         )
         params.append(_asset_id(person_id))
     if qtext:
@@ -274,7 +275,8 @@ def api_assets(
                 or exists (select 1 from asset_tags at4 join tags t4 on t4.id = at4.tag_id
                            where at4.asset_id = a.id and t4.name ilike %s)
                 or exists (select 1 from faces f4 join persons p4 on p4.id = f4.person_id
-                           where f4.asset_id = a.id and p4.name ilike %s))"""
+                           where f4.asset_id = a.id and not f4.ignored
+                           and p4.name ilike %s))"""
         )
         params.extend([like] * 7)
     if date_from:
@@ -1361,16 +1363,20 @@ def _clean_person_name(name: str) -> str:
 
 
 def _refresh_cover(conn: Any, person_id: str) -> None:
-    """封面没设或指向已删除的脸时，重选一张面积最大的。"""
+    """封面没设、指向已删除/已忽略的脸、或指向已移到别人名下的脸时，重选一张。"""
     conn.execute(
         """update persons p
               set cover_face_id = (
                     select f.id from faces f where f.person_id = p.id
+                      and not f.ignored
                      order by coalesce(f.quality, 0) desc, f.det_score desc limit 1),
                   updated_at = now()
             where p.id = %s::uuid
               and (p.cover_face_id is null
-                   or not exists (select 1 from faces c where c.id = p.cover_face_id))""",
+                   or not exists (select 1 from faces c where c.id = p.cover_face_id
+                                  and c.person_id = p.id)
+                   or exists (select 1 from faces c where c.id = p.cover_face_id
+                              and c.ignored))""",
         (person_id,),
     )
 
@@ -1378,25 +1384,30 @@ def _refresh_cover(conn: Any, person_id: str) -> None:
 @app.get("/api/persons")
 def api_persons() -> JSONResponse:
     rows = q(
-        """select p.id, coalesce(p.name, '') name, p.cover_face_id,
+        """select p.id, coalesce(p.name, '') name, p.cover_face_id, p.custom_cover,
+                  p.backup_cover,
                   (select count(*) from faces f join assets a on a.id = f.asset_id
-                    where f.person_id = p.id and not a.is_deleted) n_faces,
+                    where f.person_id = p.id and not a.is_deleted
+                      and not f.ignored) n_faces,
                   (select count(distinct f.asset_id) from faces f
                      join assets a on a.id = f.asset_id
-                    where f.person_id = p.id and not a.is_deleted) n_assets
+                    where f.person_id = p.id and not a.is_deleted
+                      and not f.ignored) n_assets
              from persons p
             order by n_assets desc, length(coalesce(p.name, '')), coalesce(p.name, ''),
                      p.created_at"""
     )
     unassigned = q(
         """select count(*) c from faces f join assets a on a.id = f.asset_id
-            where f.person_id is null and not a.is_deleted"""
+            where f.person_id is null and not a.is_deleted and not f.ignored"""
     )[0]["c"]
     return JSONResponse({
         "persons": [{
             "id": str(r["id"]),
             "name": r["name"],
             "cover": str(r["cover_face_id"]) if r["cover_face_id"] else None,
+            "custom_cover": r["custom_cover"],
+            "backup_cover": r["backup_cover"],
             "n_faces": r["n_faces"],
             "n_assets": r["n_assets"],
         } for r in rows if r["n_assets"] > 0],
@@ -1456,12 +1467,284 @@ def api_dissolve_person(person_id: str) -> JSONResponse:
     return JSONResponse({"id": pid, "faces": n})
 
 
+# ---- 人物封面：上传的自定义图，两张（derived/person_covers/）：
+#      slot=1 主封面 {id}.jpg，slot=2 备用封面 {id}_2.jpg；没传就回退人脸裁剪
+
+_PERSON_COVER_MAX = 20 * 1024 * 1024  # 上传图上限 20MB
+
+
+def _person_cover_path(person_id: str, slot: int = 1) -> Path:
+    return cfg.derived_root / "person_covers" / (f"{person_id}.jpg" if slot == 1
+                                                 else f"{person_id}_2.jpg")
+
+
+def _cover_slot(slot: int) -> int:
+    if slot not in (1, 2):
+        raise HTTPException(400, "slot 只能是 1（主封面）或 2（备用封面）")
+    return slot
+
+
+def _person_out(person_id: str) -> dict[str, Any]:
+    """单个人物的 JSON（封面接口用）；不存在时 404。"""
+    r = q(
+        """select p.id, coalesce(p.name, '') name, p.cover_face_id, p.custom_cover,
+                  p.backup_cover,
+                  (select count(*) from faces f join assets a on a.id = f.asset_id
+                    where f.person_id = p.id and not a.is_deleted
+                      and not f.ignored) n_faces,
+                  (select count(distinct f.asset_id) from faces f
+                     join assets a on a.id = f.asset_id
+                    where f.person_id = p.id and not a.is_deleted
+                      and not f.ignored) n_assets
+             from persons p
+            where p.id = %s::uuid""",
+        (person_id,),
+    )
+    if not r:
+        raise HTTPException(404, "person not found")
+    row = r[0]
+    return {
+        "id": str(row["id"]),
+        "name": row["name"],
+        "cover": str(row["cover_face_id"]) if row["cover_face_id"] else None,
+        "custom_cover": row["custom_cover"],
+        "backup_cover": row["backup_cover"],
+        "n_faces": row["n_faces"],
+        "n_assets": row["n_assets"],
+    }
+
+
+def _save_person_cover(data: bytes, person_id: str, slot: int) -> None:
+    """PIL 解码校验 + 居中裁方（≤640px）→ 临时文件写完 os.replace 原子落盘。
+
+    阻塞，走 run_in_threadpool。文件在 derived（可再生），库里只存
+    custom_cover / backup_cover 开关：文件丢了前端就回退到人脸裁剪。
+    """
+    import io
+    from PIL import Image, ImageOps
+
+    try:
+        with Image.open(io.BytesIO(data)) as im:
+            im = ImageOps.exif_transpose(im)
+            im = im.convert("RGB")
+            side = min(min(im.size), 640)
+            out = ImageOps.fit(im, (side, side))
+    except Exception:
+        raise HTTPException(400, "图片格式无法识别，换一张 JPG / PNG / WebP 试试")
+    dst = _person_cover_path(person_id, slot)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_suffix(".tmp")
+    out.save(tmp, "JPEG", quality=88)
+    os.replace(tmp, dst)
+
+
+@app.post("/api/persons/{person_id}/cover")
+async def api_upload_person_cover(person_id: str, request: Request,
+                                  slot: int = Query(1)) -> JSONResponse:
+    """原始字节流上传（和 /api/upload 一个路数，不走 multipart）。
+
+    body = 图片内容。slot=1 主封面、slot=2 备用封面。服务端居中裁成方形
+    压到 ≤640px 存 JPEG，对应开关置 true，之后前端从 /covers/{id}.jpg 取图。
+    """
+    pid = _asset_id(person_id)
+    _cover_slot(slot)
+    _person_out(pid)  # 人物存在性检查：不存在直接 404，不写文件
+    buf = bytearray()
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        buf += chunk
+        if len(buf) > _PERSON_COVER_MAX:
+            raise HTTPException(413, "图片太大（上限 20MB）")
+    if not buf:
+        raise HTTPException(400, "空文件")
+    await run_in_threadpool(_save_person_cover, bytes(buf), pid, slot)
+    flag = "custom_cover" if slot == 1 else "backup_cover"
+    rows = q(f"update persons set {flag} = true, updated_at = now() "
+             "where id = %s::uuid returning id", (pid,))
+    if not rows:
+        raise HTTPException(404, "person not found")
+    return JSONResponse(_person_out(pid))
+
+
+@app.delete("/api/persons/{person_id}/cover")
+def api_reset_person_cover(person_id: str, slot: int = Query(1)) -> JSONResponse:
+    """删掉某一张自定义封面（slot=1 主 / slot=2 备用），另一张不受影响。"""
+    pid = _asset_id(person_id)
+    _cover_slot(slot)
+    flag = "custom_cover" if slot == 1 else "backup_cover"
+    rows = q(f"update persons set {flag} = false, updated_at = now() "
+             "where id = %s::uuid returning id", (pid,))
+    if not rows:
+        raise HTTPException(404, "person not found")
+    _person_cover_path(pid, slot).unlink(missing_ok=True)
+    return JSONResponse(_person_out(pid))
+
+
+# ---- 人脸忽略：误检/杂物脸移入"忽略"，重跑识别不再回来（见 db/017_ignore_faces.sql）
+
+IGNORE_SIM = 0.8  # 新检出脸跟忽略规则的余弦相似度达到它就自动忽略
+
+
+class FaceIdsBody(BaseModel):
+    ids: list[str]
+
+
+def _uuid_list(raw: list[str]) -> list[str]:
+    out: list[str] = []
+    for x in raw:
+        try:
+            out.append(str(uuidlib.UUID(x)))
+        except ValueError:
+            raise HTTPException(400, f"bad uuid: {x}") from None
+    return list(dict.fromkeys(out))  # 去重保序
+
+
+@app.get("/api/persons/{person_id}/faces")
+def api_person_faces(person_id: str) -> JSONResponse:
+    """人物的全部脸（「人脸」抽屉用）：裁剪图走 /faces/{id}.jpg，已忽略的排后面。
+
+    kind + sha 给 hover 预览用：/thumbs/{sha}.webp 看原图海报，/file/{asset_id} 播视频。
+    """
+    pid = _asset_id(person_id)
+    rows = q(
+        """select f.id, f.asset_id, f.ignored, f.det_score, f.quality,
+                  a.taken_at_local, a.kind,
+                  (select f2.rel_path from files f2
+                    where f2.asset_id = a.id and f2.role = 'original'
+                    limit 1) rel_path
+             from faces f join assets a on a.id = f.asset_id
+            where f.person_id = %s::uuid and not a.is_deleted
+            order by f.ignored,
+                     coalesce(a.taken_at_local, a.created_at::timestamp) desc nulls last,
+                     f.det_score desc""",
+        (pid,),
+    )
+    return JSONResponse({"faces": [{
+        "id": str(r["id"]),
+        "asset_id": str(r["asset_id"]),
+        "ignored": r["ignored"],
+        "det_score": float(r["det_score"]),
+        "quality": float(r["quality"]) if r["quality"] is not None else None,
+        "taken": r["taken_at_local"].isoformat() if r["taken_at_local"] else None,
+        "kind": r["kind"],
+        "sha": Path(r["rel_path"]).stem if r["rel_path"] else None,
+    } for r in rows]})
+
+
+@app.post("/api/persons/{person_id}/faces/ignore")
+def api_ignore_person_faces(person_id: str, body: FaceIdsBody) -> JSONResponse:
+    """把若干脸标记为忽略，并按 embedding 记住规则：
+    重跑识别再检出同一张脸（相似度 >= 0.8）会自动忽略。
+
+    人物剩 0 张未忽略脸时列表里自然消失（n_assets=0 被过滤），
+    脸仍挂着 person_id，恢复接口能把它们找回来。
+    """
+    pid = _asset_id(person_id)
+    ids = _uuid_list(body.ids)
+    if not ids:
+        raise HTTPException(400, "没有选择任何脸")
+    assert pool is not None
+    with pool.connection() as conn:
+        rows = conn.execute(
+            """select f.id, f.asset_id, f.embedding::text emb, f.model
+                 from faces f
+                where f.person_id = %s::uuid and f.id = any(%s::uuid[])
+                  and not f.ignored""",
+            (pid, ids),
+        ).fetchall()
+        if len(rows) != len(ids):
+            raise HTTPException(400, "有些脸不存在、已忽略或不属于这个人物")
+        conn.execute("update faces set ignored = true where id = any(%s::uuid[])", (ids,))
+        for r in rows:
+            conn.execute(
+                """insert into ignored_faces (embedding, model, face_id, asset_id)
+                   values (%s::vector, %s, %s::uuid, %s::uuid)""",
+                (r["emb"], r["model"], r["id"], r["asset_id"]),
+            )
+        conn.execute("update persons set updated_at = now() where id = %s::uuid", (pid,))
+        _refresh_cover(conn, pid)
+    return JSONResponse({**_person_out(pid), "ignored": len(rows)})
+
+
+@app.post("/api/persons/{person_id}/faces/restore")
+def api_restore_person_faces(person_id: str, body: FaceIdsBody) -> JSONResponse:
+    """恢复被忽略的脸：去掉 ignored 标记，同时删掉匹配的忽略规则
+    （按 embedding 相似度匹配删，规则里的 face_id 可能是重跑前的旧 id）。"""
+    pid = _asset_id(person_id)
+    ids = _uuid_list(body.ids)
+    if not ids:
+        raise HTTPException(400, "没有选择任何脸")
+    assert pool is not None
+    with pool.connection() as conn:
+        owned = conn.execute(
+            """select f.id from faces f
+                where f.person_id = %s::uuid and f.id = any(%s::uuid[])
+                  and f.ignored""",
+            (pid, ids),
+        ).fetchall()
+        restored = [str(r["id"]) for r in owned]
+        if restored:
+            conn.execute("update faces set ignored = false "
+                         "where id = any(%s::uuid[])", (restored,))
+            conn.execute(
+                """delete from ignored_faces g
+                    where exists (select 1 from faces f
+                                   where f.id = any(%s::uuid[])
+                                     and 1 - (g.embedding <=> f.embedding) >= %s)""",
+                (restored, IGNORE_SIM),
+            )
+            _refresh_cover(conn, pid)
+    return JSONResponse({"restored": len(restored), "person": _person_out(pid)})
+
+
+class MoveFacesBody(BaseModel):
+    ids: list[str]
+    into: str
+
+
+@app.post("/api/persons/{person_id}/faces/move")
+def api_move_person_faces(person_id: str, body: MoveFacesBody) -> JSONResponse:
+    """把若干脸从当前人物移到另一个人物——聚类拆散/并错的手工修正。
+
+    移过去的脸保持原有归属（聚类只处理未归类的脸，不会再抢走）；
+    两边人物各重选封面。已忽略的脸不支持移动（先恢复再移）。
+    """
+    pid = _asset_id(person_id)
+    into = _asset_id(body.into)
+    ids = _uuid_list(body.ids)
+    if not ids:
+        raise HTTPException(400, "没有选择任何脸")
+    if into == pid:
+        raise HTTPException(400, "不能移动到当前人物自己")
+    assert pool is not None
+    with pool.connection() as conn:
+        if not conn.execute("select 1 from persons where id = %s::uuid",
+                            (into,)).fetchone():
+            raise HTTPException(404, "目标人物不存在")
+        rows = conn.execute(
+            """select f.id from faces f
+                where f.person_id = %s::uuid and f.id = any(%s::uuid[])
+                  and not f.ignored""",
+            (pid, ids),
+        ).fetchall()
+        moved = [str(r["id"]) for r in rows]
+        if len(moved) != len(ids):
+            raise HTTPException(400, "有些脸不存在、已忽略或不属于这个人物")
+        conn.execute("update faces set person_id = %s::uuid "
+                     "where id = any(%s::uuid[])", (into, moved))
+        _refresh_cover(conn, pid)
+        _refresh_cover(conn, into)
+    return JSONResponse({"moved": len(moved), "from": _person_out(pid),
+                         "into": _person_out(into)})
+
+
 @app.get("/api/assets/{asset_id}/faces")
 def api_asset_faces(asset_id: str) -> JSONResponse:
     aid = _asset_id(asset_id)
     rows = q(
         """select f.id, f.person_id, coalesce(p.name, '') person,
-                  f.x1, f.y1, f.x2, f.y2, f.det_score
+                  f.x1, f.y1, f.x2, f.y2, f.det_score, f.ignored
              from faces f left join persons p on p.id = f.person_id
             where f.asset_id = %s::uuid
             order by coalesce(f.quality, 0) desc, f.det_score desc""",
@@ -1473,6 +1756,7 @@ def api_asset_faces(asset_id: str) -> JSONResponse:
         "person": r["person"],
         "bbox": [r["x1"], r["y1"], r["x2"], r["y2"]],
         "det_score": r["det_score"],
+        "ignored": r["ignored"],
     } for r in rows]})
 
 
@@ -2132,6 +2416,20 @@ def face_crop(face_id: str) -> FileResponse:
         raise HTTPException(404, "no face crop")
     return FileResponse(p, media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.get("/covers/{person_id}.jpg")
+def person_cover_image(person_id: str, slot: int = Query(1)) -> FileResponse:
+    """人物自定义封面（上传图，≤640px 方图）。slot=1 主封面、slot=2 备用封面。
+    重新上传会覆盖同一路径，不能 immutable，用 no-cache 走 etag 协商缓存：
+    没变就 304，变了立刻生效。"""
+    pid = _asset_id(person_id)
+    _cover_slot(slot)
+    p = _person_cover_path(pid, slot)
+    if not p.exists():
+        raise HTTPException(404, "no custom cover")
+    return FileResponse(p, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, no-cache"})
 
 
 @app.get("/frames/{sha}/{frame}.jpg")
