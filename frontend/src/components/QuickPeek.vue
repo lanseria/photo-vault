@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { api, errorText } from '@/api'
-import { useDialogStore } from '@/stores/dialog'
 import { useToastStore } from '@/stores/toast'
 import { fmtBytes, fmtDur, fmtStamp } from '@/utils/format'
 import { smartPop, type PeekAsset, type PeekRect } from '@/utils/peek'
@@ -34,7 +33,6 @@ const emit = defineEmits<{
   compressed: [{ assetId: string }]
 }>()
 
-const dialog = useDialogStore()
 const toast = useToastStore()
 
 const BOX_W = 280
@@ -146,32 +144,76 @@ const kindLabel = computed(() =>
         : '照片',
 )
 
-/* ---- 照片压缩：质量 80 重编码，另存为压缩副本（原件保留） ---- */
+/* ---- 照片压缩（Squoosh 式选项）：格式 / 质量 / 最长边，另存为压缩副本。
+   选项记在浏览器（localStorage），下次打开直接用上次的设置。 ---- */
 
 const canCompress = computed(() => props.asset.kind === 'photo' || props.asset.kind === 'live_photo')
 const compressing = ref(false)
+const optOpen = ref(false)
+
+interface CompressOptions {
+  fmt: 'keep' | 'jpeg' | 'webp'
+  quality: number
+  maxSide: number
+}
+
+const OPT_KEY = 'pv.peek.compress'
+const COMPRESSION_DEFAULTS: CompressOptions = { fmt: 'keep', quality: 80, maxSide: 0 }
+
+function loadCompressOptions(): CompressOptions {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OPT_KEY) || '{}') as Partial<CompressOptions>
+    return {
+      fmt: raw.fmt === 'jpeg' || raw.fmt === 'webp' ? raw.fmt : 'keep',
+      quality: Math.max(40, Math.min(100, Math.round(Number(raw.quality) || 80))),
+      maxSide: [0, 1280, 1920, 2560].includes(Number(raw.maxSide)) ? Number(raw.maxSide) : 0,
+    }
+  } catch {
+    return { ...COMPRESSION_DEFAULTS }
+  }
+}
+
+const opt = reactive(loadCompressOptions())
+// 选项变了立刻记下，下次压缩（包括以后打开页面）都用同一套
+watch(opt, () => localStorage.setItem(OPT_KEY, JSON.stringify({ ...opt })), { deep: true })
+
+const srcExt = computed(() => (props.asset.ext || '').replace(/^\./, '').toLowerCase())
+/** 「原格式」且原件是 PNG 时走无损 optimize，质量滑条没有意义 */
+const qualityDisabled = computed(() => opt.fmt === 'keep' && srcExt.value === 'png')
+
+const FORMAT_CHIPS: [CompressOptions['fmt'], string][] = [
+  ['keep', '原格式'],
+  ['jpeg', 'JPEG'],
+  ['webp', 'WebP'],
+]
+const MAXSIDE_CHIPS: [number, string][] = [
+  [0, '不缩放'],
+  [2560, '2560'],
+  [1920, '1920'],
+  [1280, '1280'],
+]
 
 async function compress() {
   if (compressing.value) return
-  const ok = await dialog.confirm({
-    title: '生成压缩副本？',
-    message: `按质量 80 重新编码，另存为一张新照片（当前 ${sizeLabel.value || '未知大小'}），落在同一日期分组旁边。原图保留不变，确认副本没问题后可自行删除。`,
-    confirmText: '生成压缩副本',
-  })
-  if (!ok) return
   compressing.value = true
   try {
-    const res = await api.compress(props.asset.id)
+    const res = await api.compress(props.asset.id, {
+      fmt: opt.fmt,
+      quality: opt.quality,
+      max_side: opt.maxSide,
+    })
     if (res.skipped) {
-      toast.show('这张压不动了：重编码省不出空间，未生成副本')
+      toast.show('按这些选项压不出更小的文件，未生成副本')
       return
     }
     if (res.duplicate) {
-      toast.show('压缩副本已经存在，不重复生成')
+      toast.show('相同内容的压缩副本已经存在，不重复生成')
     } else {
-      toast.show(`已生成压缩副本：${fmtBytes(res.before)} → ${fmtBytes(res.after)}，省 ${fmtBytes(res.saved)}`)
+      const dims = res.width && res.height ? `，${res.width}×${res.height}` : ''
+      toast.show(
+        `已生成压缩副本：${fmtBytes(res.before)} → ${fmtBytes(res.after)}${dims}，省 ${fmtBytes(res.saved)}`,
+      )
     }
-    console.log('[peek] emit compressed', res)
     emit('compressed', { assetId: res.asset_id! })
   } catch (e) {
     toast.show('压缩失败：' + errorText(e).slice(0, 60))
@@ -243,18 +285,71 @@ async function compress() {
           <span class="min-w-0 flex-1 truncate">{{ infoLine || ' ' }}</span>
           <button
             v-if="canCompress"
-            class="shrink-0 rounded-[7px] bg-panel2 px-2 py-[3px] text-[10.5px] font-medium text-acc tap disabled:opacity-50"
+            class="shrink-0 rounded-[7px] px-2 py-[3px] text-[10.5px] font-medium tap disabled:opacity-50"
+            :class="optOpen ? 'bg-panel2 text-fg' : 'bg-panel2 text-acc'"
             :disabled="compressing"
-            title="质量 80 重编码，覆盖原件"
-            @click="compress"
+            title="压缩选项"
+            @click="optOpen = !optOpen"
           >
-            {{ compressing ? '压缩中…' : '压缩' }}
+            压缩
           </button>
         </div>
         <div class="flex items-center justify-between">
           <span>{{ asset.taken ? fmtStamp(asset.taken) : '日期未知' }}</span>
           <span>{{ kindLabel }}</span>
         </div>
+      </div>
+
+      <!-- Squoosh 式压缩选项：选择记在浏览器，下次直接用 -->
+      <div v-if="canCompress && optOpen" class="border-t border-line bg-panel2/50 px-3 py-2">
+        <div class="mb-2 flex items-center justify-between gap-2 text-[11px] text-mut">
+          <span class="shrink-0">目标格式</span>
+          <div class="flex gap-1">
+            <button
+              v-for="[v, label] in FORMAT_CHIPS"
+              :key="v"
+              class="rounded-[7px] px-2 py-[3px] text-[10.5px] tap"
+              :class="opt.fmt === v ? 'bg-acc text-white' : 'bg-panel text-mut'"
+              @click="opt.fmt = v"
+            >
+              {{ label }}
+            </button>
+          </div>
+        </div>
+        <div class="mb-2 flex items-center gap-3 text-[11px] text-mut">
+          <span class="shrink-0">质量 <b class="font-semibold text-fg">{{ opt.quality }}</b></span>
+          <input
+            v-model.number="opt.quality"
+            type="range"
+            min="40"
+            max="100"
+            step="5"
+            class="min-w-0 flex-1 accent-[#0a84ff]"
+            :disabled="qualityDisabled"
+            title="PNG 原格式为无损压缩，无质量选项"
+          />
+        </div>
+        <div class="mb-2 flex items-center justify-between gap-2 text-[11px] text-mut">
+          <span class="shrink-0">最长边</span>
+          <div class="flex gap-1">
+            <button
+              v-for="[v, label] in MAXSIDE_CHIPS"
+              :key="v"
+              class="rounded-[7px] px-2 py-[3px] text-[10.5px] tap"
+              :class="opt.maxSide === v ? 'bg-acc text-white' : 'bg-panel text-mut'"
+              @click="opt.maxSide = v"
+            >
+              {{ label }}
+            </button>
+          </div>
+        </div>
+        <button
+          class="w-full rounded-[9px] bg-acc py-2 text-[12.5px] font-semibold text-white tap disabled:opacity-50"
+          :disabled="compressing"
+          @click="compress"
+        >
+          {{ compressing ? '压缩中…' : '生成压缩副本（原图保留）' }}
+        </button>
       </div>
     </div>
   </Teleport>

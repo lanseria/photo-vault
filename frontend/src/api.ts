@@ -139,8 +139,11 @@ export const api = {
   trash: (id: string) => request<{ ok: boolean }>(`/api/assets/${id}/trash`, { method: 'POST' }),
   restore: (id: string) =>
     request<{ ok: boolean }>(`/api/assets/${id}/restore`, { method: 'POST' }),
-  /** 照片压缩：质量 80 重编码另存为副本（原件保留）；duplicate=库里已有相同内容 */
-  compress: (id: string) =>
+  /** 照片压缩：按选项重编码另存为副本（原件保留）；duplicate=库里已有相同内容 */
+  compress: (
+    id: string,
+    opts?: { fmt?: 'keep' | 'jpeg' | 'webp'; quality?: number; max_side?: number },
+  ) =>
     request<{
       created: boolean
       skipped?: boolean
@@ -149,7 +152,10 @@ export const api = {
       before: number
       after: number
       saved: number
-    }>(`/api/assets/${id}/compress`, { method: 'POST' }),
+      ext?: string
+      width?: number
+      height?: number
+    }>(`/api/assets/${id}/compress`, jsonBody('POST', opts ?? {})),
   purge: (id: string) => request<{ ok: boolean }>(`/api/assets/${id}`, { method: 'DELETE' }),
 
   tags: (limit = 400) => request<{ tags: TagCount[] }>(`/api/tags?limit=${limit}`),

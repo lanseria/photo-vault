@@ -49,15 +49,18 @@ const hasPrev = computed(() => index.value > 0)
 const hasNext = computed(() => index.value >= 0 && index.value < props.items.length - 1)
 const isVideo = computed(() => props.asset.kind === 'video')
 const canPlayLive = computed(() => props.asset.kind === 'live_photo')
-const meta = computed(
-  () => `${props.asset.width || '?'}×${props.asset.height || '?'} · ${fmtBytes(props.asset.bytes)}`,
-)
 const dateText = computed(() => takenDateText(props.asset))
 /** 素材库不把「未识别设备」当成需要处理的问题，只留中性的设备入口 */
 const unknownDevice = computed(() => props.asset.device_unknown === true && props.asset.library !== 'material')
 
-/* ---------------- 详细信息面板 ---------------- */
-const infoShown = ref(false)
+/* ---------------- 详细信息面板 ----------------
+   常驻悬挂（默认打开，偏好记在浏览器）；窄屏（<640px）默认收起避免挡图，
+   仍可用顶部 ⓘ 随时展开。 */
+const INFO_KEY = 'pv.lightbox.info'
+const infoShown = ref(
+  typeof window !== 'undefined' && localStorage.getItem(INFO_KEY) !== '0' && window.innerWidth >= 640,
+)
+watch(infoShown, v => localStorage.setItem(INFO_KEY, v ? '1' : '0'))
 const info = ref<AssetInfo | null>(null)
 
 const KIND_TEXT: Record<string, string> = {
@@ -96,6 +99,14 @@ interface InfoRow {
   copy?: string
 }
 
+/** 详情面板的设备名：info 拉到后给规范型号组，没拉到退回列表的展示名 */
+const deviceName = computed(() => {
+  const names = info.value?.device
+    ? [...new Set([info.value.device.model_canonical, info.value.device.model_raw].filter(Boolean))]
+    : []
+  return names.join(' · ') || props.asset.model || '未识别设备'
+})
+
 /** 详细信息行：有数据才出这一行，尽量给全（拍摄/同步/来源/文件/EXIF/GPS） */
 const infoRows = computed<InfoRow[]>(() => {
   const a = props.asset
@@ -129,9 +140,11 @@ const infoRows = computed<InfoRow[]>(() => {
     label: '大小',
     value: fmtBytes(a.bytes) + (a.raw_ext ? ` + RAW ${fmtBytes(a.raw_bytes)}` : ''),
   })
-  if (inf?.device) {
-    const names = [...new Set([inf.device.model_canonical, inf.device.model_raw].filter(Boolean))]
-    if (names.length) rows.push({ label: '拍摄设备', value: names.join(' · ') })
+  if (a.raw_ext) {
+    rows.push({
+      label: 'RAW+JPEG',
+      value: `${a.raw_ext} · ${fmtBytes(a.raw_bytes)}（出稿时一起给）`,
+    })
   }
   if (inf?.lens) rows.push({ label: '镜头', value: inf.lens })
   const ex = inf?.exif
@@ -279,70 +292,107 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <div class="relative flex min-h-0 flex-1 items-center justify-center">
-      <img
-        v-if="!isVideo && !livePlaying"
-        :src="`/preview/${asset.id}`"
-        alt=""
-        class="max-h-full max-w-full object-contain"
-      />
-      <video
-        v-else-if="isVideo"
-        ref="videoEl"
-        :src="`/file/${asset.id}`"
-        controls
-        autoplay
-        playsinline
-        class="max-h-full max-w-full"
-      />
-      <video
-        v-else
-        :src="`/file/${asset.id}?role=live_motion`"
-        controls
-        autoplay
-        playsinline
-        class="max-h-full max-w-full"
-      />
+    <div class="flex min-h-0 flex-1">
+      <div class="relative flex min-w-0 flex-1 items-center justify-center">
+        <img
+          v-if="!isVideo && !livePlaying"
+          :src="`/preview/${asset.id}`"
+          alt=""
+          class="max-h-full max-w-full object-contain"
+        />
+        <video
+          v-else-if="isVideo"
+          ref="videoEl"
+          :src="`/file/${asset.id}`"
+          controls
+          autoplay
+          playsinline
+          class="max-h-full max-w-full"
+        />
+        <video
+          v-else
+          :src="`/file/${asset.id}?role=live_motion`"
+          controls
+          autoplay
+          playsinline
+          class="max-h-full max-w-full"
+        />
 
-      <button
-        v-if="hasPrev"
-        class="absolute left-2.5 top-1/2 flex h-[70px] w-[46px] -translate-y-1/2 items-center justify-center rounded-xl bg-[rgba(60,60,67,.4)] text-white opacity-75 hover:opacity-100"
-        aria-label="上一张"
-        @click="emit('prev')"
-      >
-        <AppIcon name="chevron-left" :size="24" :stroke="2.4" />
-      </button>
-      <button
-        v-if="hasNext"
-        class="absolute right-2.5 top-1/2 flex h-[70px] w-[46px] -translate-y-1/2 items-center justify-center rounded-xl bg-[rgba(60,60,67,.4)] text-white opacity-75 hover:opacity-100"
-        aria-label="下一张"
-        @click="emit('next')"
-      >
-        <AppIcon name="chevron-right" :size="24" :stroke="2.4" />
-      </button>
+        <button
+          v-if="hasPrev"
+          class="absolute left-2.5 top-1/2 flex h-[70px] w-[46px] -translate-y-1/2 items-center justify-center rounded-xl bg-[rgba(60,60,67,.4)] text-white opacity-75 hover:opacity-100"
+          aria-label="上一张"
+          @click="emit('prev')"
+        >
+          <AppIcon name="chevron-left" :size="24" :stroke="2.4" />
+        </button>
+        <button
+          v-if="hasNext"
+          class="absolute right-2.5 top-1/2 flex h-[70px] w-[46px] -translate-y-1/2 items-center justify-center rounded-xl bg-[rgba(60,60,67,.4)] text-white opacity-75 hover:opacity-100"
+          aria-label="下一张"
+          @click="emit('next')"
+        >
+          <AppIcon name="chevron-right" :size="24" :stroke="2.4" />
+        </button>
+      </div>
+
+      <!-- 详细信息：常驻悬挂在右侧（宽屏是布局的一部分，图片在剩余空间居中；
+           窄屏退回覆盖式滑入）。打开灯箱时就预取好了（loadExtras） -->
+      <Transition name="slide-right">
+        <aside
+          v-if="infoShown"
+          class="flex w-[min(360px,92vw)] max-w-full shrink-0 flex-col border-l border-line bg-[rgba(16,16,18,.96)] backdrop-blur-md lt-sm:absolute lt-sm:inset-y-0 lt-sm:right-0 lt-sm:z-[8]"
+        >
+          <div class="flex items-center justify-between border-b border-line/60 px-4 py-3">
+            <h3 class="m-0 text-[15px] font-semibold">详细信息</h3>
+            <button class="icon-btn" aria-label="收起" @click="infoShown = false">
+              <AppIcon name="close" :size="20" />
+            </button>
+          </div>
+          <div class="min-h-0 flex-1 overflow-auto px-4 py-3">
+            <div v-if="!info" class="spinner !my-6" />
+            <dl v-else class="m-0 flex flex-col gap-3.5">
+              <!-- 拍摄设备：从图片下方移进来，可直接更换归类 -->
+              <div>
+                <dt class="text-[11.5px] leading-tight text-mut">拍摄设备</dt>
+                <dd class="m-0 mt-0.5 flex items-center gap-2">
+                  <span
+                    class="min-w-0 flex-1 break-all text-[13px] leading-snug"
+                    :class="unknownDevice && 'text-warn'"
+                    >{{ deviceName }}</span
+                  >
+                  <button
+                    class="shrink-0 rounded-[7px] bg-panel px-2 py-0.5 text-[11px] text-acc tap"
+                    @click="pickingDevice = true"
+                  >
+                    更换
+                  </button>
+                </dd>
+              </div>
+              <div v-for="row in infoRows" :key="row.label">
+                <dt class="text-[11.5px] leading-tight text-mut">{{ row.label }}</dt>
+                <dd class="m-0 mt-0.5 flex items-start gap-2">
+                  <span
+                    class="min-w-0 flex-1 break-all text-[13px] leading-snug"
+                    :class="row.mono && 'font-mono text-[12px]'"
+                    >{{ row.value }}</span
+                  >
+                  <button
+                    v-if="row.copy"
+                    class="shrink-0 pt-0.5 text-[11px] text-mut hover:text-acc"
+                    @click="row.copy && copyText(row.copy, row.label)"
+                  >
+                    复制
+                  </button>
+                </dd>
+              </div>
+            </dl>
+          </div>
+        </aside>
+      </Transition>
     </div>
 
     <div class="flex flex-col gap-2.5 px-4 pb-safe-16">
-      <div class="flex flex-wrap items-center justify-center gap-x-2 gap-y-1.5 text-[12.5px] text-mut">
-        <button
-          class="inline-flex items-center gap-1.5 rounded-full bg-panel2 px-2.5 py-1 text-[12.5px] tap"
-          :class="unknownDevice && '!text-warn'"
-          :title="asset.device_raw || 'EXIF 里没有机型'"
-          @click="pickingDevice = true"
-        >
-          <span>📷 {{ unknownDevice ? '未识别设备' : asset.device_unknown ? '设备' : asset.model }}</span>
-          <span class="text-[11px] opacity-60">更换</span>
-        </button>
-        <span>{{ meta }}</span>
-        <span
-          v-if="asset.raw_ext"
-          class="inline-flex items-center gap-1 rounded-full bg-panel2 px-2.5 py-1 text-[12.5px] text-warn"
-          :title="`出稿时连同 RAW（${asset.raw_ext}）一起给`"
-        >
-          RAW+JPEG · {{ fmtBytes(asset.raw_bytes) }}
-        </span>
-      </div>
-
       <div v-if="faces.length" class="flex flex-wrap items-center gap-2">
         <button
           v-for="face in faces"
@@ -452,44 +502,6 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </div>
-
-    <!-- 详细信息：右侧滑入的面板，桌面 / 手机共用一套布局。
-         打开灯箱时就预取好了（loadExtras），点开秒出内容 -->
-    <Transition name="slide-right">
-      <aside
-        v-if="infoShown"
-        class="absolute inset-y-0 right-0 z-[8] flex w-[min(360px,92vw)] flex-col border-l border-line bg-[rgba(16,16,18,.96)] backdrop-blur-md"
-      >
-        <div class="flex items-center justify-between border-b border-line/60 px-4 py-3">
-          <h3 class="m-0 text-[15px] font-semibold">详细信息</h3>
-          <button class="icon-btn" aria-label="关闭" @click="infoShown = false">
-            <AppIcon name="close" :size="20" />
-          </button>
-        </div>
-        <div class="min-h-0 flex-1 overflow-auto px-4 py-3">
-          <div v-if="!info" class="spinner !my-6" />
-          <dl v-else class="m-0 flex flex-col gap-3.5">
-            <div v-for="row in infoRows" :key="row.label">
-              <dt class="text-[11.5px] leading-tight text-mut">{{ row.label }}</dt>
-              <dd class="m-0 mt-0.5 flex items-start gap-2">
-                <span
-                  class="min-w-0 flex-1 break-all text-[13px] leading-snug"
-                  :class="row.mono && 'font-mono text-[12px]'"
-                  >{{ row.value }}</span
-                >
-                <button
-                  v-if="row.copy"
-                  class="shrink-0 pt-0.5 text-[11px] text-mut hover:text-acc"
-                  @click="row.copy && copyText(row.copy, row.label)"
-                >
-                  复制
-                </button>
-              </dd>
-            </div>
-          </dl>
-        </div>
-      </aside>
-    </Transition>
 
     <DevicePicker
       v-if="pickingDevice"

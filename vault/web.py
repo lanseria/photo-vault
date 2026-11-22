@@ -1058,7 +1058,9 @@ def api_purge(asset_id: str) -> JSONResponse:
 
 # 可压缩的照片格式（浏览器原生格式之外加上 HEIC，pillow-heif 已注册）
 _COMPRESS_EXT = {".jpg", ".jpeg", ".jfif", ".jpe", ".png", ".webp", ".heic", ".heif"}
-_COMPRESS_QUALITY = 80
+_COMPRESS_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".jfif": "image/jpeg",
+                  ".jpe": "image/jpeg", ".png": "image/png", ".webp": "image/webp",
+                  ".heic": "image/heic", ".heif": "image/heif"}
 
 
 def _sha_hex(v: Any) -> str:
@@ -1066,19 +1068,28 @@ def _sha_hex(v: Any) -> str:
     return v.hex() if isinstance(v, (bytes, bytearray)) else str(v)
 
 
+class CompressBody(BaseModel):
+    """压缩选项（Squoosh 式）：格式 / 质量 / 最长边；全部可省略走默认。"""
+
+    fmt: str = "keep"      # keep = 保持原格式；jpeg / webp = 转换格式
+    quality: int = 80      # 40..100（PNG 无损格式忽略）
+    max_side: int = 0      # 0 = 不缩放；>0 = 最长边缩到该值（只缩小不放大）
+
+
 @app.post("/api/assets/{asset_id}/compress")
-def api_compress(asset_id: str) -> JSONResponse:
-    """照片压缩：质量 80 重编码，另存为一份新的照片（原件保留不动）。
+def api_compress(asset_id: str, body: CompressBody | None = None) -> JSONResponse:
+    """照片压缩：按选项重编码，另存为一份新的照片（原件保留不动）。
 
     副本继承拍摄时间 / 时区 / 设备 / GPS / 标签 / EXIF，落在同一个库里，
-    所以会出现在原件旁边的同一日期分组；确认原件没问题后可自行删除。
-    输出内容与库里已有文件相同（比如对同一张压过两次）时直接复用，
+    所以会出现在原件旁边的同一日期分组；确认副本没问题后可自行删除。
+    输出内容与库里已有文件相同（比如同一张用同样选项压过两次）时直接复用，
     不生成第二份相同副本（duplicate=true）。
     """
+    body = body or CompressBody()
     aid = _asset_id(asset_id)
     rows = q(
         """select a.kind, a.library, f.sha256, f.bytes, f.ext, f.rel_path,
-                  f.mime, f.source_id, f.src_path, f.origin_path
+                  f.source_id, f.src_path, f.origin_path
              from assets a join files f on f.asset_id = a.id and f.role = 'original'
             where a.id = %s and not a.is_deleted""",
         (aid,),
@@ -1088,9 +1099,15 @@ def api_compress(asset_id: str) -> JSONResponse:
     r = rows[0]
     if r["kind"] not in ("photo", "live_photo"):
         raise HTTPException(400, "只能压缩照片")
-    ext = (r["ext"] or "").lower()
-    if ext not in _COMPRESS_EXT:
-        raise HTTPException(400, f"不支持的格式：{ext or '未知'}")
+    src_ext = (r["ext"] or "").lower()
+    if src_ext not in _COMPRESS_EXT:
+        raise HTTPException(400, f"不支持的格式：{src_ext or '未知'}")
+
+    fmt = body.fmt if body.fmt in ("keep", "jpeg", "webp") else "keep"
+    quality = max(40, min(100, int(body.quality or 80)))
+    max_side = max(0, int(body.max_side or 0))
+    # 转换格式的目标后缀；keep 就沿用原件（png 走无损 optimize，质量参数不适用）
+    out_ext = src_ext if fmt == "keep" else f".{fmt}"
 
     from PIL import Image, ImageOps
 
@@ -1102,15 +1119,17 @@ def api_compress(asset_id: str) -> JSONResponse:
         im = ImageOps.exif_transpose(im)      # 压缩顺带把旋转修正进像素里
         exif = im.info.get("exif")
         icc = im.info.get("icc_profile")
+        if max_side > 0 and max(im.size) > max_side:
+            im.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)  # 只缩小不放大
         buf = io.BytesIO()
-        if ext == ".png":
-            im.save(buf, "PNG", optimize=True)          # 无损格式只能压结构，聊胜于无
-        elif ext == ".webp":
-            im.save(buf, "WEBP", quality=_COMPRESS_QUALITY, method=4)
-        elif ext in (".heic", ".heif"):
-            im.save(buf, "HEIF", quality=_COMPRESS_QUALITY)
+        if out_ext == ".png":
+            im.save(buf, "PNG", optimize=True)
+        elif out_ext == ".webp":
+            im.save(buf, "WEBP", quality=quality, method=4)
+        elif out_ext in (".heic", ".heif"):
+            im.save(buf, "HEIF", quality=quality)
         else:
-            params: dict[str, Any] = {"quality": _COMPRESS_QUALITY, "optimize": True}
+            params: dict[str, Any] = {"quality": quality, "optimize": True}
             if exif:
                 params["exif"] = exif
             if icc:
@@ -1120,12 +1139,11 @@ def api_compress(asset_id: str) -> JSONResponse:
         width, height = im.size
 
     old_bytes = int(r["bytes"] or 0)
-    # 省不出 3% 就不生成副本：JPEG 反复重编码每次都会轻微劣化，没意义
+    # 省不出 3% 就不生成副本：反复重编码每次都会轻微劣化，没意义
     if len(data) >= old_bytes * 0.97:
         return JSONResponse({"created": False, "skipped": True, "before": old_bytes,
                              "after": old_bytes, "saved": 0})
 
-    import hashlib
     new_sha = hashlib.sha256(data).hexdigest()
 
     # 内容已在库里（同一张压过两次、或恰好有相同内容的文件）→ 复用那份副本
@@ -1137,7 +1155,7 @@ def api_compress(asset_id: str) -> JSONResponse:
                              "before": old_bytes, "after": len(data),
                              "saved": old_bytes - len(data)})
 
-    rel = hashutil.vault_rel_path(new_sha, ext)
+    rel = hashutil.vault_rel_path(new_sha, out_ext)
     final = cfg.vault_root / rel
     final.parent.mkdir(parents=True, exist_ok=True)
     tmp = hashutil.new_landing_path(cfg.landing_root)
@@ -1174,7 +1192,7 @@ def api_compress(asset_id: str) -> JSONResponse:
                                   width, height, phash, source_id, src_path,
                                   storage_mode, origin_path, origin_rel)
                values (%s, 'original', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'copy', %s, %s)""",
-            (new_aid, bytes.fromhex(new_sha), len(data), r["mime"], ext, rel,
+            (new_aid, bytes.fromhex(new_sha), len(data), _COMPRESS_MIME[out_ext], out_ext, rel,
              width, height, hashutil.average_hash(final),
              r["source_id"], r["src_path"], r["origin_path"], rel),
         )
@@ -1188,7 +1206,8 @@ def api_compress(asset_id: str) -> JSONResponse:
 
     return JSONResponse({"created": True, "asset_id": str(new_aid),
                          "before": old_bytes, "after": len(data),
-                         "saved": old_bytes - len(data)})
+                         "saved": old_bytes - len(data),
+                         "ext": out_ext, "width": width, "height": height})
 
 
 # ---------------------------------------------------------------- 标签

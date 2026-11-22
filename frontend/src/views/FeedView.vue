@@ -282,7 +282,6 @@ function peekKeep() {
 
 /** 预览里生成了压缩副本：重新拉列表，副本（继承拍摄时间）会出现在同一日期分组里 */
 function onPeekCompressed() {
-  console.log('[feed] onPeekCompressed called')
   feed.requestReload()
 }
 
