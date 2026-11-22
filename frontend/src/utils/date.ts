@@ -51,6 +51,16 @@ export function groupHeader(key: string, mode: GroupMode): string {
   return `${startYear}年${monthDayFmt.format(start)} – ${endText}`
 }
 
+/** 日期跳转用：把一个 YYYY-MM-DD 换算成当前分组粒度下的分组键（和 groupKey 同一套规则）。 */
+export function dayGroupKey(day: string, mode: GroupMode): string {
+  if (mode === 'day') return day
+  if (mode === 'month') return day.slice(0, 7)
+  if (mode === 'year') return day.slice(0, 4)
+  const start = parseDay(day)
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7)) // 回到这周的周一
+  return isoDay(start)
+}
+
 /** 日期分组键：taken 的 YYYY-MM-DD；没有拍摄时间的一律归到 unknown。 */
 export function dateKey(asset: Asset): string {
   return asset.taken ? asset.taken.slice(0, 10) : 'unknown'

@@ -110,7 +110,7 @@ export const useFeedStore = defineStore('feed', () => {
     total.value = count
   }
 
-  async function loadPage(reset: boolean): Promise<void> {
+  async function loadPage(reset: boolean, pageSize = PAGE_SIZE): Promise<void> {
     if (!reset && pending > 0) return
     if (!reset && ready.value && total.value === 0) return
     if (!reset && total.value > 0 && items.value.length >= total.value) return
@@ -125,7 +125,9 @@ export const useFeedStore = defineStore('feed', () => {
     pending += 1
     loading.value = true
     try {
-      const page = await api.assets(buildParams(config.value, reset ? 0 : items.value.length))
+      const params = buildParams(config.value, reset ? 0 : items.value.length)
+      params.limit = pageSize
+      const page = await api.assets(params)
       if (mySeq !== seq) return
       merge(page.items, page.total)
       ready.value = true
@@ -163,6 +165,34 @@ export const useFeedStore = defineStore('feed', () => {
       await nextTick()
       if (items.value.length === before) return
     }
+  }
+
+  /**
+   * 日期跳转用：补齐到第 index 项可见为止（index 来自日期分布的偏移计算）。
+   * 跳转可能要一次补很多页，用 300/页（接口上限）减少往返。
+   * loadPage 对并发会让路（哨兵的 IntersectionObserver 可能同时触发 loadMore），
+   * 所以空转一圈时先等在途的页落地再判断，连续几轮真没长出来才放弃。
+   */
+  async function expandToIndex(index: number, maxPages = 200) {
+    let stalled = 0
+    for (let i = 0; i < maxPages; i++) {
+      if (done.value || items.value.length > index) return
+      const before = items.value.length
+      await loadPage(false, 300)
+      while (loading.value) await new Promise(r => setTimeout(r, 80))
+      await nextTick()
+      if (items.value.length === before) {
+        stalled += 1
+        if (stalled >= 3) return
+        continue
+      }
+      stalled = 0
+    }
+  }
+
+  /** 当前筛选下「哪天有几张」的日期分布，日期跳转面板用。 */
+  function loadDates() {
+    return api.dates(buildParams(config.value, 0))
   }
 
   /** 按 id 替换字段；灯箱和网格共享同一批响应式对象。 */
@@ -207,6 +237,8 @@ export const useFeedStore = defineStore('feed', () => {
     open,
     loadMore,
     expandToHeight,
+    expandToIndex,
+    loadDates,
     patch,
     toggleFavorite,
     removeMany,

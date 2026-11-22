@@ -35,6 +35,8 @@ const ICONS: Record<string, string> = {
     '<path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.6"/>',
   refresh: '<path d="M20 12a8 8 0 11-2.4-5.7M20 4v5h-5"/>',
   folderOpen: '<path d="M3 7h6l2 2h10v11H3z"/><path d="M3 13h18"/>',
+  calendar:
+    '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.6h.01"/>',
 }
 

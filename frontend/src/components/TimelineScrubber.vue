@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useFeedStore } from '@/stores/feed'
+import DateJump from '@/components/DateJump.vue'
 
 /**
  * 右侧时间轴（iOS 相册式的快速定位条）：
@@ -254,6 +255,9 @@ onBeforeUnmount(() => {
     </template>
     <span v-if="scrubbing" class="tl-thumb" :style="{ top: (thumbPct * 100).toFixed(2) + '%' }" />
   </div>
+
+  <!-- 左下角的按日期跳转入口：activeKey 就是当前看到的时间段 -->
+  <DateJump :active-key="activeKey" />
 
   <Teleport to="body">
     <div

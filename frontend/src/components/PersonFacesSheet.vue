@@ -5,7 +5,9 @@ import type { Person, PersonFace } from '@/types'
 import { useToastStore } from '@/stores/toast'
 import { usePeopleStore } from '@/stores/people'
 import { fmtStamp } from '@/utils/format'
+import { rectOf, toPeekAsset, type PeekRect } from '@/utils/peek'
 import PersonPicker from '@/components/PersonPicker.vue'
+import QuickPeek from '@/components/QuickPeek.vue'
 
 /**
  * 「人脸」抽屉：列出人物的全部脸，点选后忽略 / 恢复 / 移动到别的人物。
@@ -48,6 +50,8 @@ async function load() {
     const res = await api.personFaces(props.personId)
     faces.value = res.faces
     selected.value.clear()
+    // 预览的那张脸可能已被移走（移动到别的人物），别把浮层挂在消失的脸上
+    if (preview.value && !faces.value.some(f => f.id === preview.value!.face.id)) closePreview()
   } catch (e) {
     toast.show('人脸加载失败：' + errorText(e).slice(0, 40))
   } finally {
@@ -123,35 +127,51 @@ async function onPickTarget(target: Person) {
   }
 }
 
-/* ---------------- hover 预览：悬停人脸看原图 / 播视频，方便判断是谁 ---------------- */
+/* ---------------- hover 预览：悬停人脸看原图 / 播视频，方便判断是谁。
+   预览锚在对应人脸格子的上方（共享组件 QuickPeek 智能落位）；
+   右击人脸可「固定」住（不随 hover 消失），固定后能拖到任意位置、点 ✕ 关闭。 ---------------- */
 
 const canHover =
   typeof window !== 'undefined' && !!window.matchMedia?.('(hover: hover)').matches
 
-const preview = ref<{ face: PersonFace; x: number; y: number } | null>(null)
-/** 视频海报上的 ▶ 点了之后挂 video 元素流播原件 */
-const playing = ref(false)
+/** pinned = 右击固定态：hover 离开不消失，可拖动 */
+const preview = ref<{ face: PersonFace; rect: PeekRect; pinned: boolean } | null>(null)
 let showTimer: ReturnType<typeof setTimeout> | undefined
 let hideTimer: ReturnType<typeof setTimeout> | undefined
 
 function onFaceEnter(face: PersonFace, event: MouseEvent) {
-  if (!canHover) return
-  const x = event.clientX
-  const y = event.clientY
+  if (!canHover || preview.value?.pinned) return
+  const rect = rectOf(event.currentTarget as Element)
   clearTimeout(hideTimer)
   clearTimeout(showTimer)
   showTimer = setTimeout(() => {
-    playing.value = false
-    preview.value = { face, x, y }
+    preview.value = { face, rect, pinned: false }
   }, 220)
 }
 
 function onFaceLeave() {
+  if (preview.value?.pinned) return
   clearTimeout(showTimer)
   hideTimer = setTimeout(() => {
     preview.value = null
-    playing.value = false
   }, 150)
+}
+
+/** 右击人脸：固定预览（没显示就直接以固定态打开）；再右击同一张解除固定 */
+function onFacePin(face: PersonFace, event: MouseEvent) {
+  if (preview.value?.pinned && preview.value.face.id === face.id) {
+    preview.value = { ...preview.value, pinned: false }
+    return
+  }
+  clearTimeout(showTimer)
+  clearTimeout(hideTimer)
+  preview.value = { face, rect: rectOf(event.currentTarget as Element), pinned: true }
+}
+
+function closePreview() {
+  clearTimeout(showTimer)
+  clearTimeout(hideTimer)
+  preview.value = null
 }
 
 /** 鼠标从脸移进浮层（看视频时）不关浮层 */
@@ -159,34 +179,15 @@ function keepPreview() {
   clearTimeout(hideTimer)
 }
 
+/** 列表滚动只收起未固定的预览，固定态不受影响 */
 function hidePreviewNow() {
+  if (preview.value?.pinned) return
   clearTimeout(showTimer)
   clearTimeout(hideTimer)
   preview.value = null
-  playing.value = false
 }
 
-/** 贴着鼠标弹出，但别伸出屏幕右边 / 下边 */
-const popStyle = computed(() => {
-  const p = preview.value
-  if (!p) return {}
-  const w = p.face.kind === 'video' ? 420 : 280
-  const left = Math.max(8, Math.min(p.x + 16, window.innerWidth - w - 12))
-  const top = Math.max(8, Math.min(p.y + 16, window.innerHeight - 280))
-  return { left: `${left}px`, top: `${top}px` }
-})
-
-/** 缩略图挂了（没生成过）退到 /preview 原件代理 */
-function thumbError(event: Event) {
-  const img = event.target as HTMLImageElement
-  const face = preview.value?.face
-  if (face && !img.dataset.fallback) {
-    img.dataset.fallback = '1'
-    img.src = `/preview/${face.asset_id}`
-  } else {
-    img.style.display = 'none'
-  }
-}
+/** 预览里压缩成功：同步人脸列表和预览框里的 sha / 大小 */
 </script>
 
 <template>
@@ -205,6 +206,7 @@ function thumbError(event: Event) {
         <p class="mb-2.5 px-1 text-center text-[11.5px] leading-relaxed text-mut">
           点选要移除的脸 →「忽略所选」。忽略的脸不再计入人物，
           重跑识别检出同一张脸也会自动忽略。
+          <template v-if="canHover">悬停可预览原图，右击固定预览（可拖动）。</template>
         </p>
 
         <div v-if="ignored.length" class="mb-2 flex items-center justify-between px-1">
@@ -241,6 +243,7 @@ function thumbError(event: Event) {
               :key="face.id"
               class="flex flex-col items-center gap-1"
               @click="toggle(face.id)"
+              @contextmenu.prevent="onFacePin(face, $event)"
               @mouseenter="onFaceEnter(face, $event)"
               @mouseleave="onFaceLeave"
             >
@@ -315,50 +318,17 @@ function thumbError(event: Event) {
       @close="pickerOpen = false"
     />
 
-    <!-- hover 预览浮层：照片直接看原图，视频先看海报帧、点 ▶ 流播 -->
-    <div
+    <!-- hover 预览：锚在对应人脸格子上方，右击固定（共享组件 QuickPeek）。
+         压缩副本不带人脸，不会出现在这个视图里，无需刷新 -->
+    <QuickPeek
       v-if="preview"
-      class="fixed z-[150] overflow-hidden rounded-xl border border-line bg-panel shadow-2xl"
-      :style="popStyle"
-      @mouseenter="keepPreview"
-      @mouseleave="onFaceLeave"
-    >
-      <div class="relative bg-black">
-        <template v-if="preview.face.kind === 'video' && playing">
-          <video
-            :src="`/file/${preview.face.asset_id}`"
-            controls
-            autoplay
-            playsinline
-            class="max-h-[300px] w-full"
-            @ended="playing = false"
-          />
-        </template>
-        <template v-else>
-          <img
-            v-if="preview.face.sha"
-            :src="`/thumbs/${preview.face.sha}.webp`"
-            alt=""
-            class="max-h-[300px] w-full object-contain"
-            @error="thumbError"
-          />
-          <div v-else class="flex h-[160px] items-center justify-center text-[13px] text-mut">
-            没有可预览的原图
-          </div>
-          <button
-            v-if="preview.face.kind === 'video'"
-            class="absolute inset-0 flex items-center justify-center bg-black/30 text-[34px] text-white tap"
-            title="播放视频"
-            @click="playing = true"
-          >
-            ▶
-          </button>
-        </template>
-      </div>
-      <div class="flex items-center justify-between px-3 py-1.5 text-[11.5px] text-mut">
-        <span>{{ preview.face.taken ? fmtStamp(preview.face.taken) : '日期未知' }}</span>
-        <span>{{ preview.face.kind === 'video' ? '视频' : '照片' }}</span>
-      </div>
-    </div>
+      :asset="toPeekAsset(preview.face)"
+      :anchor="preview.rect"
+      :pinned="preview.pinned"
+      prefer="above"
+      @close="closePreview"
+      @keep="keepPreview"
+      @leave="onFaceLeave"
+    />
   </Teleport>
 </template>

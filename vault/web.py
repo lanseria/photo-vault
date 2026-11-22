@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import mimetypes
 import os
 import re
@@ -23,7 +24,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
-from . import cinema, meta
+from . import cinema, hashutil, meta
 from . import db as dbmod
 from . import ingest as ingest_mod
 from .config import Config
@@ -216,25 +217,25 @@ def api_stats() -> JSONResponse:
 
 # ---------------------------------------------------------------- 资产列表
 
-@app.get("/api/assets")
-def api_assets(
-    limit: int = Query(120, ge=1, le=300),
-    offset: int = Query(0, ge=0),
+def _asset_filters(
+    *,
+    trash: bool = False,
+    library: str | None = None,
     kind: str | None = None,
-    qtext: str | None = Query(None, alias="q"),
-    date_from: str | None = None,
-    date_to: str | None = None,
     favorite: bool | None = None,
     tag: str | None = None,
     person_id: str | None = None,
-    trash: bool = False,
-    library: str | None = None,
-    min_sec: float | None = Query(None, ge=0),
-    max_sec: float | None = Query(None, ge=0),
-    min_px: int | None = Query(None, ge=0),
-    device: str | None = Query(None, description="设备 id，或 'unknown' 表示未识别"),
-    folder: str | None = Query(None, description="文件夹 id（任意库），或 'none' 表示未整理"),
-) -> JSONResponse:
+    qtext: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    min_sec: float | None = None,
+    max_sec: float | None = None,
+    min_px: int | None = None,
+    device: str | None = None,
+    folder: str | None = None,
+) -> tuple[list[str], list[Any]]:
+    """资产列表的 where 条件。列表 /api/assets 和日期分布 /api/assets/dates
+    共用同一份，保证跳转面板看到的日期和实际列表完全一致。"""
     where = ["a.is_deleted" if trash else "not a.is_deleted"]
     params: list[Any] = []
 
@@ -311,6 +312,33 @@ def api_assets(
             where.append("a.folder_id = %s::uuid")
             params.append(_asset_id(folder))
 
+    return where, params
+
+
+@app.get("/api/assets")
+def api_assets(
+    limit: int = Query(120, ge=1, le=300),
+    offset: int = Query(0, ge=0),
+    kind: str | None = None,
+    qtext: str | None = Query(None, alias="q"),
+    date_from: str | None = None,
+    date_to: str | None = None,
+    favorite: bool | None = None,
+    tag: str | None = None,
+    person_id: str | None = None,
+    trash: bool = False,
+    library: str | None = None,
+    min_sec: float | None = Query(None, ge=0),
+    max_sec: float | None = Query(None, ge=0),
+    min_px: int | None = Query(None, ge=0),
+    device: str | None = Query(None, description="设备 id，或 'unknown' 表示未识别"),
+    folder: str | None = Query(None, description="文件夹 id（任意库），或 'none' 表示未整理"),
+) -> JSONResponse:
+    where, params = _asset_filters(
+        trash=trash, library=library, kind=kind, favorite=favorite, tag=tag,
+        person_id=person_id, qtext=qtext, date_from=date_from, date_to=date_to,
+        min_sec=min_sec, max_sec=max_sec, min_px=min_px, device=device, folder=folder,
+    )
     clause = " and ".join(where)
     base = f"""
         from assets a
@@ -340,6 +368,50 @@ def api_assets(
     )
 
     return JSONResponse({"total": total, "items": [_item_json(r, trash=trash) for r in rows]})
+
+
+@app.get("/api/assets/dates")
+def api_asset_dates(
+    kind: str | None = None,
+    qtext: str | None = Query(None, alias="q"),
+    favorite: bool | None = None,
+    tag: str | None = None,
+    person_id: str | None = None,
+    trash: bool = False,
+    library: str | None = None,
+    min_sec: float | None = Query(None, ge=0),
+    max_sec: float | None = Query(None, ge=0),
+    min_px: int | None = Query(None, ge=0),
+    device: str | None = Query(None, description="设备 id，或 'unknown' 表示未识别"),
+    folder: str | None = Query(None, description="文件夹 id（任意库），或 'none' 表示未整理"),
+) -> JSONResponse:
+    """当前筛选下「哪天有几张」的日期分布（按拍摄日倒序）。
+
+    日期跳转面板一次拿到全部分布，就能在客户端算出任意日期在流里的
+    偏移量（排在它之后的张数之和），不用为了跳转从头翻分页。
+    回收站的排序是删除时间不是拍摄时间，前端在回收站隐藏跳转入口。"""
+    where, params = _asset_filters(
+        trash=trash, library=library, kind=kind, favorite=favorite, tag=tag,
+        person_id=person_id, qtext=qtext, min_sec=min_sec, max_sec=max_sec,
+        min_px=min_px, device=device, folder=folder,
+    )
+    # 没有拍摄时间的资产归不到任何日期，跳转也落不进去，不进分布
+    where.append("a.taken_at_local is not null")
+    clause = " and ".join(where)
+    rows = q(
+        f"""select a.taken_at_local::date as day, count(*) as c
+            from assets a
+            left join devices d on d.id = a.device_id
+            join files f on f.asset_id = a.id and f.role = 'original'
+            {_RAW_JOIN}
+            where {clause}
+            group by 1
+            order by 1 desc""",
+        tuple(params),
+    )
+    return JSONResponse(
+        {"days": [{"day": r["day"].isoformat(), "count": int(r["c"])} for r in rows]}
+    )
 
 
 # ---------------------------------------------------------------- 剪辑箱 / 出稿
@@ -982,6 +1054,143 @@ def api_purge(asset_id: str) -> JSONResponse:
     return JSONResponse({"id": aid, "purged": True})
 
 
+# ---------------------------------------------------------------- 照片压缩
+
+# 可压缩的照片格式（浏览器原生格式之外加上 HEIC，pillow-heif 已注册）
+_COMPRESS_EXT = {".jpg", ".jpeg", ".jfif", ".jpe", ".png", ".webp", ".heic", ".heif"}
+_COMPRESS_QUALITY = 80
+
+
+def _sha_hex(v: Any) -> str:
+    """files.sha256 是 bytea：psycopg 读出来是 bytes。"""
+    return v.hex() if isinstance(v, (bytes, bytearray)) else str(v)
+
+
+@app.post("/api/assets/{asset_id}/compress")
+def api_compress(asset_id: str) -> JSONResponse:
+    """照片压缩：质量 80 重编码，另存为一份新的照片（原件保留不动）。
+
+    副本继承拍摄时间 / 时区 / 设备 / GPS / 标签 / EXIF，落在同一个库里，
+    所以会出现在原件旁边的同一日期分组；确认原件没问题后可自行删除。
+    输出内容与库里已有文件相同（比如对同一张压过两次）时直接复用，
+    不生成第二份相同副本（duplicate=true）。
+    """
+    aid = _asset_id(asset_id)
+    rows = q(
+        """select a.kind, a.library, f.sha256, f.bytes, f.ext, f.rel_path,
+                  f.mime, f.source_id, f.src_path, f.origin_path
+             from assets a join files f on f.asset_id = a.id and f.role = 'original'
+            where a.id = %s and not a.is_deleted""",
+        (aid,),
+    )
+    if not rows:
+        raise HTTPException(404, "asset not found")
+    r = rows[0]
+    if r["kind"] not in ("photo", "live_photo"):
+        raise HTTPException(400, "只能压缩照片")
+    ext = (r["ext"] or "").lower()
+    if ext not in _COMPRESS_EXT:
+        raise HTTPException(400, f"不支持的格式：{ext or '未知'}")
+
+    from PIL import Image, ImageOps
+
+    src = cfg.vault_root / r["rel_path"]
+    if not src.exists():
+        raise HTTPException(404, "file missing on disk")
+
+    with Image.open(src) as im:
+        im = ImageOps.exif_transpose(im)      # 压缩顺带把旋转修正进像素里
+        exif = im.info.get("exif")
+        icc = im.info.get("icc_profile")
+        buf = io.BytesIO()
+        if ext == ".png":
+            im.save(buf, "PNG", optimize=True)          # 无损格式只能压结构，聊胜于无
+        elif ext == ".webp":
+            im.save(buf, "WEBP", quality=_COMPRESS_QUALITY, method=4)
+        elif ext in (".heic", ".heif"):
+            im.save(buf, "HEIF", quality=_COMPRESS_QUALITY)
+        else:
+            params: dict[str, Any] = {"quality": _COMPRESS_QUALITY, "optimize": True}
+            if exif:
+                params["exif"] = exif
+            if icc:
+                params["icc_profile"] = icc
+            im.save(buf, "JPEG", **params)
+        data = buf.getvalue()
+        width, height = im.size
+
+    old_bytes = int(r["bytes"] or 0)
+    # 省不出 3% 就不生成副本：JPEG 反复重编码每次都会轻微劣化，没意义
+    if len(data) >= old_bytes * 0.97:
+        return JSONResponse({"created": False, "skipped": True, "before": old_bytes,
+                             "after": old_bytes, "saved": 0})
+
+    import hashlib
+    new_sha = hashlib.sha256(data).hexdigest()
+
+    # 内容已在库里（同一张压过两次、或恰好有相同内容的文件）→ 复用那份副本
+    dup = q("select asset_id from files where sha256=%s and role='original' limit 1",
+            (bytes.fromhex(new_sha),))
+    if dup:
+        return JSONResponse({"created": False, "duplicate": True,
+                             "asset_id": str(dup[0]["asset_id"]),
+                             "before": old_bytes, "after": len(data),
+                             "saved": old_bytes - len(data)})
+
+    rel = hashutil.vault_rel_path(new_sha, ext)
+    final = cfg.vault_root / rel
+    final.parent.mkdir(parents=True, exist_ok=True)
+    tmp = hashutil.new_landing_path(cfg.landing_root)
+    tmp.write_bytes(data)
+    os.replace(tmp, final)                # landing 与 vault 同卷，原子
+
+    # 缩略图先建好再写库，避免副本出现后缩略图 404 的窗口期
+    if not meta.make_thumb(final, ingest_mod._thumb_path(cfg, new_sha),
+                           cfg.thumb_size, cfg.thumb_quality):
+        final.unlink(missing_ok=True)
+        raise HTTPException(500, "缩略图生成失败，未创建副本")
+
+    assert pool is not None
+    with pool.connection() as conn, conn.transaction():
+        # 副本继承拍摄信息落到同一个库；live_photo 的副本是静图，不再带 motion
+        new_aid = conn.execute(
+            """insert into assets
+                 (kind, taken_at_local, tz_offset_min, tz_source, taken_at_utc,
+                  device_id, lens, width, height, duration_ms, gps, library)
+               select 'photo', taken_at_local, tz_offset_min, tz_source, taken_at_utc,
+                      device_id, lens, %s, %s, null, gps, library
+                 from assets where id = %s
+               returning id""",
+            (width, height, aid),
+        ).fetchone()["id"]
+        conn.execute(
+            """insert into exif (asset_id, iso, aperture, shutter, focal_mm, orientation, raw)
+               select %s, iso, aperture, shutter, focal_mm, orientation, raw
+                 from exif where asset_id = %s""",
+            (new_aid, aid),
+        )
+        conn.execute(
+            """insert into files (asset_id, role, sha256, bytes, mime, ext, rel_path,
+                                  width, height, phash, source_id, src_path,
+                                  storage_mode, origin_path, origin_rel)
+               values (%s, 'original', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'copy', %s, %s)""",
+            (new_aid, bytes.fromhex(new_sha), len(data), r["mime"], ext, rel,
+             width, height, hashutil.average_hash(final),
+             r["source_id"], r["src_path"], r["origin_path"], rel),
+        )
+        # 标签跟着副本走：删掉原件后组织结构不丢
+        conn.execute(
+            """insert into asset_tags (asset_id, tag_id)
+               select %s, tag_id from asset_tags where asset_id = %s
+               on conflict do nothing""",
+            (new_aid, aid),
+        )
+
+    return JSONResponse({"created": True, "asset_id": str(new_aid),
+                         "before": old_bytes, "after": len(data),
+                         "saved": old_bytes - len(data)})
+
+
 # ---------------------------------------------------------------- 标签
 
 class TagBody(BaseModel):
@@ -1605,15 +1814,15 @@ def api_person_faces(person_id: str) -> JSONResponse:
     """人物的全部脸（「人脸」抽屉用）：裁剪图走 /faces/{id}.jpg，已忽略的排后面。
 
     kind + sha 给 hover 预览用：/thumbs/{sha}.webp 看原图海报，/file/{asset_id} 播视频。
+    ext/bytes/width/height/duration_ms 给预览框的简要信息行。
     """
     pid = _asset_id(person_id)
     rows = q(
         """select f.id, f.asset_id, f.ignored, f.det_score, f.quality,
-                  a.taken_at_local, a.kind,
-                  (select f2.rel_path from files f2
-                    where f2.asset_id = a.id and f2.role = 'original'
-                    limit 1) rel_path
+                  a.taken_at_local, a.kind, a.width, a.height, a.duration_ms,
+                  fo.ext, fo.bytes, fo.rel_path
              from faces f join assets a on a.id = f.asset_id
+             left join files fo on fo.asset_id = a.id and fo.role = 'original'
             where f.person_id = %s::uuid and not a.is_deleted
             order by f.ignored,
                      coalesce(a.taken_at_local, a.created_at::timestamp) desc nulls last,
@@ -1629,6 +1838,11 @@ def api_person_faces(person_id: str) -> JSONResponse:
         "taken": r["taken_at_local"].isoformat() if r["taken_at_local"] else None,
         "kind": r["kind"],
         "sha": Path(r["rel_path"]).stem if r["rel_path"] else None,
+        "ext": r["ext"],
+        "bytes": int(r["bytes"] or 0),
+        "width": r["width"],
+        "height": r["height"],
+        "duration_ms": r["duration_ms"],
     } for r in rows]})
 
 

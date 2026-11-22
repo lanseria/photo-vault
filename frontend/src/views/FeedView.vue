@@ -13,8 +13,10 @@ import { useAssetActions } from '@/composables/useAssetActions'
 import { usePhotoQuery } from '@/composables/usePhotoQuery'
 import { isGroupMode } from '@/utils/date'
 import { readScroll, restoreScroll, scrollKey } from '@/composables/scrollMemory'
+import { rectOf, toPeekAsset, type PeekRect } from '@/utils/peek'
 import PhotoCell from '@/components/PhotoCell.vue'
 import PhotoLightbox from '@/components/PhotoLightbox.vue'
+import QuickPeek from '@/components/QuickPeek.vue'
 import TimelineScrubber from '@/components/TimelineScrubber.vue'
 import PersonCoverHeader from '@/components/PersonCoverHeader.vue'
 import { setAssetDragData } from '@/utils/dnd'
@@ -220,6 +222,84 @@ function onCellDragStart(event: DragEvent, asset: Asset) {
   setAssetDragData(event, ids)
 }
 
+/* ---------------- hover 快速预览：悬停格子看大图 / 简要信息，右击固定 ---------------- */
+
+const canHover =
+  typeof window !== 'undefined' && !!window.matchMedia?.('(hover: hover)').matches
+
+const peek = ref<{ asset: ReturnType<typeof toPeekAsset>; rect: PeekRect; pinned: boolean } | null>(
+  null,
+)
+let peekShowTimer: ReturnType<typeof setTimeout> | undefined
+let peekHideTimer: ReturnType<typeof setTimeout> | undefined
+
+function peekShow(asset: Asset, event: MouseEvent) {
+  if (!canHover || selection.active || photo.photoId.value) return
+  if (peek.value?.pinned) return
+  const rect = rectOf(event.currentTarget as Element)
+  clearTimeout(peekHideTimer)
+  clearTimeout(peekShowTimer)
+  peekShowTimer = setTimeout(() => {
+    peek.value = { asset: toPeekAsset(asset), rect, pinned: false }
+  }, 260)
+}
+
+function peekHide() {
+  if (peek.value?.pinned) return
+  clearTimeout(peekShowTimer)
+  peekHideTimer = setTimeout(() => {
+    peek.value = null
+  }, 150)
+}
+
+/** 右击格子：固定预览；再右击同一格解除固定 */
+function peekPin(asset: Asset, event: MouseEvent) {
+  if (selection.active) return
+  if (peek.value?.pinned && peek.value.asset.id === asset.id) {
+    peek.value = { ...peek.value, pinned: false }
+    return
+  }
+  clearTimeout(peekShowTimer)
+  clearTimeout(peekHideTimer)
+  peek.value = { asset: toPeekAsset(asset), rect: rectOf(event.currentTarget as Element), pinned: true }
+}
+
+function peekClose() {
+  clearTimeout(peekShowTimer)
+  clearTimeout(peekHideTimer)
+  peek.value = null
+}
+
+// 滚动 / 进入选择模式 / 开灯箱 / 换视图时收起未固定的预览
+function peekHideOnScroll() {
+  if (peek.value?.pinned) return
+  peekClose()
+}
+
+function peekKeep() {
+  clearTimeout(peekHideTimer)
+}
+
+/** 预览里生成了压缩副本：重新拉列表，副本（继承拍摄时间）会出现在同一日期分组里 */
+function onPeekCompressed() {
+  console.log('[feed] onPeekCompressed called')
+  feed.requestReload()
+}
+
+watch(
+  () => selection.active,
+  active => {
+    if (active) peekClose()
+  },
+)
+watch(
+  () => photo.photoId.value,
+  id => {
+    if (id) peekClose()
+  },
+)
+watch(cfgKey, () => peekClose())
+
 function stepPhoto(delta: number) {
   const list = feed.items
   const i = list.findIndex(a => a.id === photo.photoId.value)
@@ -295,6 +375,7 @@ onMounted(() => {
   if (sentinel.value) observer.observe(sentinel.value)
   document.addEventListener('keydown', onKeydown)
   window.addEventListener('resize', fillViewport)
+  window.addEventListener('scroll', peekHideOnScroll, { passive: true })
   fillViewport()
 })
 
@@ -304,6 +385,7 @@ onBeforeUnmount(() => {
   selection.stop()
   document.removeEventListener('keydown', onKeydown)
   window.removeEventListener('resize', fillViewport)
+  window.removeEventListener('scroll', peekHideOnScroll)
   if (fillFrame) cancelAnimationFrame(fillFrame)
 })
 
@@ -334,6 +416,9 @@ function onKeydown(event: KeyboardEvent) {
           :draggable="draggable"
           @activate="onActivate(asset, $event)"
           @dragstart="onCellDragStart($event, asset)"
+          @mouseenter="peekShow(asset, $event)"
+          @mouseleave="peekHide"
+          @contextmenu.prevent="peekPin(asset, $event)"
         />
       </div>
     </div>
@@ -360,6 +445,18 @@ function onKeydown(event: KeyboardEvent) {
     <div ref="sentinel" class="h-2" />
 
     <TimelineScrubber />
+
+    <!-- hover 快速预览：锚在格子上方/下方，右击固定 -->
+    <QuickPeek
+      v-if="peek"
+      :asset="peek.asset"
+      :anchor="peek.rect"
+      :pinned="peek.pinned"
+      @close="peekClose"
+      @keep="peekKeep"
+      @leave="peekHide"
+      @compressed="onPeekCompressed"
+    />
 
     <PhotoLightbox
       v-if="currentAsset"

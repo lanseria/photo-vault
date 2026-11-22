@@ -41,6 +41,11 @@ export interface AssetPage {
   items: Asset[]
 }
 
+/** /api/assets/dates：当前筛选下「哪天有几张」，拍摄日倒序 */
+export interface DateHistogram {
+  days: { day: string; count: number }[]
+}
+
 export interface Stats {
   count: number
   gallery: number
@@ -209,6 +214,12 @@ export interface PersonFace {
   kind?: string
   /** 原件内容 sha → /thumbs/{sha}.webp 海报 */
   sha?: string | null
+  /** 预览框简要信息行用的原件字段 */
+  ext?: string | null
+  bytes?: number | null
+  width?: number | null
+  height?: number | null
+  duration_ms?: number | null
 }
 
 /** 忽略/恢复人脸的响应：person 为人物最新状态（person_removed=true 时人物已不存在） */

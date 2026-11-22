@@ -6,6 +6,7 @@ import type {
   BinItems,
   CinemaList,
   CinemaTitleDetail,
+  DateHistogram,
   DeliverResult,
   Device,
   DeviceList,
@@ -101,6 +102,8 @@ export const api = {
   stats: () => request<Stats>('/api/stats'),
 
   assets: (params: AssetQuery) => request<AssetPage>(`/api/assets${queryString({ ...params })}`),
+  /** 日期分布（同一套筛选）：日期跳转面板用它算出任意日期在流里的偏移 */
+  dates: (params: AssetQuery) => request<DateHistogram>(`/api/assets/dates${queryString({ ...params })}`),
   asset: (id: string) => request<Asset>(`/api/assets/${id}`),
   /** 灯箱详细信息面板：拍摄/同步/来源/EXIF/GPS 一次给全 */
   info: (id: string) => request<AssetInfo>(`/api/assets/${id}/info`),
@@ -136,6 +139,17 @@ export const api = {
   trash: (id: string) => request<{ ok: boolean }>(`/api/assets/${id}/trash`, { method: 'POST' }),
   restore: (id: string) =>
     request<{ ok: boolean }>(`/api/assets/${id}/restore`, { method: 'POST' }),
+  /** 照片压缩：质量 80 重编码另存为副本（原件保留）；duplicate=库里已有相同内容 */
+  compress: (id: string) =>
+    request<{
+      created: boolean
+      skipped?: boolean
+      duplicate?: boolean
+      asset_id?: string
+      before: number
+      after: number
+      saved: number
+    }>(`/api/assets/${id}/compress`, { method: 'POST' }),
   purge: (id: string) => request<{ ok: boolean }>(`/api/assets/${id}`, { method: 'DELETE' }),
 
   tags: (limit = 400) => request<{ tags: TagCount[] }>(`/api/tags?limit=${limit}`),
