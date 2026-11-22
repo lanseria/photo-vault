@@ -32,7 +32,10 @@ services:
       retries: 20
 
   app:
-    build: .
+    build:
+      context: .
+      # Dockerfile 里 app / worker 两个最终阶段；这里只构建 app 目标
+      target: app
     restart: unless-stopped
     depends_on:
       db:
@@ -60,6 +63,39 @@ services:
       # 影视库独立挂载：和 vault 同一个盘会形成嵌套挂载，Docker 允许；
       # 放在另一块盘（D:\Movies）也完全可以 —— 影视不需要硬链接。
       - ${MEDIA_HOST_ROOT:-./media}:/media
+
+  # ML worker：人脸识别 / RAM++ 打标 / 视频摘要，随 compose 一起常驻。
+  # 与 app 共用 /host 挂载（同样的 vault / derived 内容），模型权重从宿主机
+  # models/ 只读挂载复用（缺权重会自动下载到挂载目录，宿主机也能用）。
+  # llama.cpp / qwen3-vl 的视频模型是 Windows 版、没挂进容器 → video 任务自动跳过，
+  # 视频摘要仍由宿主机 worker 跑（uv run --group ml python -m ml.worker --task video）。
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-vault}:${POSTGRES_PASSWORD:-vault}@db:5432/${POSTGRES_DB:-vault}
+      VAULT_ROOT: /host/vault
+      DERIVED_ROOT: /host/derived
+      VAULT_MODELS_DIR: /models
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - ${HOST_ROOT:-./host}:/host
+      # 权重只读挂载：insightface 人脸模型 + RAM++ 打标权重
+      - ./models/insightface:/models/insightface:ro
+      - ./models/ram_plus_int8.onnx:/models/ram_plus_int8.onnx:ro
+    # 有 NVIDIA GPU 且 Docker Desktop（WSL2）已配好 GPU 时，去掉下面的注释走 GPU：
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
 
 volumes:
   pgdata:

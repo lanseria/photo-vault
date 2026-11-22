@@ -1,18 +1,20 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { api } from '@/api'
-import type { Asset, AssetInfo, Face, VideoInfo } from '@/types'
+import { api, errorText } from '@/api'
+import type { Asset, AssetInfo, Face, Person, VideoInfo } from '@/types'
 import { takenDateText } from '@/utils/date'
-import { fmtBytes, fmtDur, fmtFrameTime, fmtShutter, fmtStamp } from '@/utils/format'
+import { fmtBytes, fmtDur, fmtFrameTime, fmtShutter, fmtStamp, sleep } from '@/utils/format'
 import { useAssetActions } from '@/composables/useAssetActions'
 import { lockScroll, unlockScroll } from '@/composables/scrollMemory'
 import { useDevicesStore } from '@/stores/devices'
+import { usePeopleStore } from '@/stores/people'
 import { useSystemStore } from '@/stores/system'
 import { useTagSheetStore } from '@/stores/tagSheet'
 import { useToastStore } from '@/stores/toast'
 import AppIcon from './AppIcon.vue'
 import DevicePicker from './DevicePicker.vue'
+import PersonPicker from './PersonPicker.vue'
 
 const props = defineProps<{
   asset: Asset
@@ -35,6 +37,7 @@ const router = useRouter()
 const actions = useAssetActions()
 const sheet = useTagSheetStore()
 const devices = useDevicesStore()
+const peopleStore = usePeopleStore()
 const system = useSystemStore()
 const toast = useToastStore()
 
@@ -43,6 +46,66 @@ const video = ref<VideoInfo | null>(null)
 const livePlaying = ref(false)
 const videoEl = ref<HTMLVideoElement | null>(null)
 const pickingDevice = ref(false)
+
+/* ---------------- 修人脸归属：✎ 打开人物选择器，已归类的走 move，未归类走 assign ---------------- */
+const editFace = ref<Face | null>(null)
+const pickerPersons = ref<Person[]>([])
+const movingFace = ref(false)
+
+async function startFaceEdit(face: Face) {
+  editFace.value = face
+  // 排除当前归属（移动到自己没有意义）；未归类则全部人物都可选
+  await peopleStore.load()
+  pickerPersons.value = peopleStore.persons.filter(p => p.id !== face.person_id)
+}
+
+/* ---------------- 手动 AI 人脸识别：对没识别过的照片单独入队，轮询等 worker 写回 ---------------- */
+
+const detecting = ref(false)
+
+/** 没有脸的照片才需要手动识别（有脸的用 ✎ 修归属；视频不在网页跑人脸） */
+const canDetect = computed(
+  () =>
+    !props.trashView &&
+    faces.value.length === 0 &&
+    (props.asset.kind === 'photo' || props.asset.kind === 'live_photo'),
+)
+
+async function detectFaces() {
+  if (detecting.value) return
+  const id = props.asset.id
+  detecting.value = true
+  try {
+    await api.runFaces(id)
+    // worker 异步提取：轮询等脸写回；任务到 ok/failed 就到头了，不用干等
+    const deadline = Date.now() + 90_000
+    while (Date.now() < deadline) {
+      await sleep(2500)
+      if (props.asset.id !== id) return // 已经切到别的照片
+      const res = await api.faces(id)
+      if (props.asset.id !== id) return
+      const found = res.faces.filter(f => !f.ignored)
+      if (found.length) {
+        faces.value = found
+        toast.show(`识别到 ${found.length} 张人脸，点 ✎ 可修改归属`)
+        return
+      }
+      if (res.job === 'ok') {
+        toast.show('识别完成：这张照片里没有检测到人脸')
+        return
+      }
+      if (res.job === 'failed' || res.job === 'dead') {
+        toast.show('识别失败：这张照片处理不了')
+        return
+      }
+    }
+    toast.show('识别已加入队列，还在后台进行，稍后重新打开即可看到')
+  } catch (e) {
+    toast.show('入队失败：' + errorText(e).slice(0, 60))
+  } finally {
+    detecting.value = false
+  }
+}
 
 const index = computed(() => props.items.findIndex(a => a.id === props.asset.id))
 const hasPrev = computed(() => index.value > 0)
@@ -181,13 +244,7 @@ async function loadExtras() {
   info.value = null
   livePlaying.value = false
 
-  api
-    .faces(id)
-    .then(res => {
-      // 已忽略的脸（误检）不再展示
-      if (props.asset.id === id) faces.value = res.faces.filter(f => !f.ignored)
-    })
-    .catch(() => undefined)
+  loadFaces(id)
 
   // 详情（拍摄/同步/来源/EXIF/GPS）预取好，点 ⓘ 面板秒开
   api
@@ -204,6 +261,40 @@ async function loadExtras() {
         if (props.asset.id === id) video.value = res
       })
       .catch(() => undefined)
+  }
+}
+
+/** 拉这张媒体的人脸（修归属后也要重拉） */
+function loadFaces(id: string) {
+  api
+    .faces(id)
+    .then(res => {
+      // 已忽略的脸（误检）不再展示
+      if (props.asset.id === id) faces.value = res.faces.filter(f => !f.ignored)
+    })
+    .catch(() => undefined)
+}
+
+/** 人物选择器选定目标：已归类走 move，未归类走 assign，完成后刷新脸和计数 */
+async function onFaceTarget(person: Person) {
+  const face = editFace.value
+  if (!face || movingFace.value) return
+  movingFace.value = true
+  try {
+    if (face.person_id) {
+      await api.movePersonFaces(face.person_id, [face.id], person.id)
+    } else {
+      await api.assignFaces([face.id], person.id)
+    }
+    toast.show(`这张脸已归到「${person.name || '未命名'}」`)
+    editFace.value = null
+    loadFaces(props.asset.id)
+    // 人物的封面/计数变了，下次进人物页要用新数据
+    void peopleStore.load(true)
+  } catch (e) {
+    toast.show('修改失败：' + errorText(e).slice(0, 60))
+  } finally {
+    movingFace.value = false
   }
 }
 
@@ -394,17 +485,34 @@ onBeforeUnmount(() => {
 
     <div class="flex flex-col gap-2.5 px-4 pb-safe-16">
       <div v-if="faces.length" class="flex flex-wrap items-center gap-2">
-        <button
+        <div
           v-for="face in faces"
           :key="face.id"
-          class="inline-flex items-center gap-1.5 rounded-full bg-panel2 py-[3px] pl-[3px] pr-3 text-[13px]"
-          :class="!face.person_id && 'opacity-55'"
-          :disabled="!face.person_id"
-          @click="face.person_id && openPerson(face.person_id)"
+          class="inline-flex items-center gap-0.5 rounded-full bg-panel2 py-[3px] pl-[3px] pr-1 text-[13px]"
+          :class="!face.person_id && 'opacity-70'"
         >
-          <img :src="`/faces/${face.id}.jpg`" alt="" loading="lazy" class="h-[30px] w-[30px] rounded-full bg-panel object-cover" />
-          <span>{{ face.person || '未归类' }}</span>
-        </button>
+          <button
+            class="inline-flex items-center gap-1.5 rounded-full tap disabled:cursor-default disabled:opacity-60"
+            :disabled="!face.person_id"
+            :title="face.person_id ? `查看 ${face.person || '未命名'}` : '未归类人脸'"
+            @click="face.person_id && openPerson(face.person_id)"
+          >
+            <img
+              :src="`/faces/${face.id}.jpg`"
+              alt=""
+              loading="lazy"
+              class="h-[30px] w-[30px] rounded-full bg-panel object-cover"
+            />
+            <span>{{ face.person || '未归类' }}</span>
+          </button>
+          <button
+            class="flex h-6 w-6 items-center justify-center rounded-full text-mut hover:text-acc tap"
+            :title="face.person_id ? `把这张脸改归到其他人物（当前：${face.person || '未命名'}）` : '归类到人物'"
+            @click="startFaceEdit(face)"
+          >
+            <AppIcon name="edit" :size="13" :stroke="2.2" />
+          </button>
+        </div>
       </div>
 
       <div v-if="isVideo && video?.summary" class="flex flex-col gap-1.5">
@@ -469,6 +577,16 @@ onBeforeUnmount(() => {
           剪辑箱
         </button>
         <button
+          v-if="canDetect"
+          class="flex flex-col items-center gap-[3px] text-[11px] text-acc disabled:opacity-60"
+          :disabled="detecting"
+          title="对这张照片单独跑一次 AI 人脸识别"
+          @click="detectFaces"
+        >
+          <AppIcon name="sparkles" :size="24" />
+          {{ detecting ? '识别中…' : '识别人脸' }}
+        </button>
+        <button
           v-if="canPlayLive"
           class="flex flex-col items-center gap-[3px] text-[11px]"
           @click="livePlaying = !livePlaying"
@@ -512,6 +630,19 @@ onBeforeUnmount(() => {
       @pick="pickDevice"
       @close="pickingDevice = false"
       @manage="pickingDevice = false; emit('close'); router.push('/devices')"
+    />
+
+    <!-- 修人脸归属：✎ 选目标人物；已归类走 move，未归类走 assign -->
+    <PersonPicker
+      v-if="editFace"
+      :people="pickerPersons"
+      :title="
+        editFace.person_id
+          ? `把这张脸从「${editFace.person || '未命名'}」改归到…`
+          : '这张脸归到哪个人物？'
+      "
+      @pick="onFaceTarget"
+      @close="editFace = null"
     />
   </div>
 </template>

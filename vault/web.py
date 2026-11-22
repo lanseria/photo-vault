@@ -1555,15 +1555,36 @@ def api_faces_queue() -> JSONResponse:
     })
 
 
-@app.post("/api/faces/queue/run")
-def api_faces_run() -> JSONResponse:
-    """全量入队（幂等：已排队 / 已完成的资产不重复），顺带清掉暂停标记。
+class FacesRunBody(BaseModel):
+    """可选 asset_id：只对这一张手动入队（灯箱「识别人脸」按钮用）。"""
 
-    重复点「开始识别」不会把队列撑大；dead 任务不拦着重新入队（换模型重跑的场景）。
+    asset_id: str | None = None
+
+
+@app.post("/api/faces/queue/run")
+def api_faces_run(body: FacesRunBody | None = None) -> JSONResponse:
+    """人脸识别入队（幂等：已排队 / 已完成的资产不重复），顺带清掉暂停标记。
+
+    不带 asset_id 就是全量入队（人物页「开始识别」）；带 asset_id 只对这一张
+    入队——单张的显式意图优先于「素材库不跑人脸」的批量策略。
+    重复点不会把队列撑大；dead 任务不拦着重新入队（换模型重跑的场景）。
     """
     assert pool is not None
     with pool.connection() as conn:
-        cur = conn.execute(_FACES_QUEUE_SQL)
+        if body and body.asset_id:
+            aid = _asset_id(body.asset_id)
+            cur = conn.execute(
+                """insert into jobs (kind, payload)
+                   select 'faces', jsonb_build_object('asset_id', %s::text)
+                   where not exists (
+                     select 1 from jobs j
+                     where j.kind = 'faces' and j.state in ('pending', 'running', 'ok')
+                       and j.payload->>'asset_id' = %s::text
+                   )""",
+                (aid, aid),
+            )
+        else:
+            cur = conn.execute(_FACES_QUEUE_SQL)
         conn.execute(_SET_FACES_PAUSED_SQL, ("0",))
         queued = cur.rowcount
     return JSONResponse({"queued": queued})
@@ -1972,6 +1993,42 @@ def api_move_person_faces(person_id: str, body: MoveFacesBody) -> JSONResponse:
                          "into": _person_out(into)})
 
 
+class AssignFacesBody(BaseModel):
+    ids: list[str]
+    person_id: str
+
+
+@app.post("/api/faces/assign")
+def api_assign_faces(body: AssignFacesBody) -> JSONResponse:
+    """把未归类的人脸手工挂到某个人物——聚类漏掉的脸，灯箱里修归属用。
+
+    与 move 不同：这里只收 person_id 为空（未归类）的脸；已归类的走
+    /api/persons/{pid}/faces/move。忽略的脸不支持（先恢复再归类）。
+    """
+    pid = _asset_id(body.person_id)
+    ids = _uuid_list(body.ids)
+    if not ids:
+        raise HTTPException(400, "没有选择任何脸")
+    assert pool is not None
+    with pool.connection() as conn:
+        if not conn.execute("select 1 from persons where id = %s::uuid",
+                            (pid,)).fetchone():
+            raise HTTPException(404, "目标人物不存在")
+        rows = conn.execute(
+            """select f.id from faces f
+                where f.person_id is null and f.id = any(%s::uuid[])
+                  and not f.ignored""",
+            (ids,),
+        ).fetchall()
+        moved = [str(r["id"]) for r in rows]
+        if len(moved) != len(ids):
+            raise HTTPException(400, "有些脸不存在、已归类或已忽略")
+        conn.execute("update faces set person_id = %s::uuid "
+                     "where id = any(%s::uuid[])", (pid, moved))
+        _refresh_cover(conn, pid)
+    return JSONResponse({"assigned": len(moved), "person": _person_out(pid)})
+
+
 @app.get("/api/assets/{asset_id}/faces")
 def api_asset_faces(asset_id: str) -> JSONResponse:
     aid = _asset_id(asset_id)
@@ -1983,14 +2040,24 @@ def api_asset_faces(asset_id: str) -> JSONResponse:
             order by coalesce(f.quality, 0) desc, f.det_score desc""",
         (aid,),
     )
-    return JSONResponse({"faces": [{
-        "id": str(r["id"]),
-        "person_id": str(r["person_id"]) if r["person_id"] else None,
-        "person": r["person"],
-        "bbox": [r["x1"], r["y1"], r["x2"], r["y2"]],
-        "det_score": r["det_score"],
-        "ignored": r["ignored"],
-    } for r in rows]})
+    # 识别任务状态：null = 还没入过队；pending/running = 识别中；ok = 已识别完
+    job = q(
+        """select state from jobs
+            where kind = 'faces' and payload->>'asset_id' = %s
+            order by id desc limit 1""",
+        (aid,),
+    )
+    return JSONResponse({
+        "job": job[0]["state"] if job else None,
+        "faces": [{
+            "id": str(r["id"]),
+            "person_id": str(r["person_id"]) if r["person_id"] else None,
+            "person": r["person"],
+            "bbox": [r["x1"], r["y1"], r["x2"], r["y2"]],
+            "det_score": r["det_score"],
+            "ignored": r["ignored"],
+        } for r in rows],
+    })
 
 
 @app.get("/api/assets/{asset_id}/video")

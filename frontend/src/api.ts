@@ -170,7 +170,9 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  faces: (id: string) => request<{ faces: Face[] }>(`/api/assets/${id}/faces`),
+  /** 这张媒体的人脸；job = 识别任务状态（null 未入队 / pending / running / ok / failed） */
+  faces: (id: string) =>
+    request<{ faces: Face[]; job?: string | null }>(`/api/assets/${id}/faces`),
   video: (id: string) => request<VideoInfo>(`/api/assets/${id}/video`),
 
   devices: () => request<DeviceList>('/api/devices'),
@@ -191,8 +193,12 @@ export const api = {
 
   /** 人脸任务队列：网页只管入队 / 启停 / 看进度，提取在宿主机 worker 里跑 */
   facesQueue: () => request<FaceQueue>('/api/faces/queue'),
-  runFaces: () =>
-    request<{ queued: number }>('/api/faces/queue/run', jsonBody('POST', {})),
+  /** 不带 assetId 全量入队；带则只对这一张手动入队（灯箱「识别人脸」） */
+  runFaces: (assetId?: string) =>
+    request<{ queued: number }>(
+      '/api/faces/queue/run',
+      jsonBody('POST', assetId ? { asset_id: assetId } : {}),
+    ),
   pauseFaces: (paused: boolean) =>
     request<{ paused: boolean }>(
       '/api/faces/queue/pause',
@@ -234,6 +240,12 @@ export const api = {
   /** 把若干脸移到另一个人物（聚类纠错） */
   movePersonFaces: (id: string, ids: string[], into: string) =>
     request<FaceMoveResult>(`/api/persons/${id}/faces/move`, jsonBody('POST', { ids, into })),
+  /** 把未归类的人脸挂到某个人物（灯箱修人脸归属用） */
+  assignFaces: (ids: string[], personId: string) =>
+    request<{ assigned: number }>(
+      '/api/faces/assign',
+      jsonBody('POST', { ids, person_id: personId }),
+    ),
 
   bins: () => request<BinList>('/api/bins'),
   createBin: (name: string) =>

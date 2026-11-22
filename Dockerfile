@@ -16,7 +16,7 @@ COPY frontend/ ./
 RUN pnpm build
 
 # ---- 后端 ----
-FROM python:3.12-slim
+FROM python:3.12-slim AS app
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -53,3 +53,36 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:7878/api/stats >/dev/null || exit 1
 
 CMD ["python", "-m", "vault.cli", "serve"]
+
+# ---- ML worker：同一套后端代码 + ONNX 人脸/打标依赖，随 compose 常驻 ----
+# 与 app 的差别只在多装 ml 依赖组（onnxruntime-gpu + opencv-headless）和 ml/ 源码。
+# 有 NVIDIA GPU（Docker Desktop WSL2 已配 GPU）时在 compose 里加 nvidia 设备预留即走 GPU；
+# 没有 CUDA 库时 onnxruntime 自动回退 CPU——只慢，不影响结果。
+FROM python:3.12-slim AS worker
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    TZ=Asia/Shanghai
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg tzdata curl \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.7 /uv /uvx /bin/
+
+WORKDIR /app
+
+# ml 依赖组已在 uv.lock 里锁定；--frozen 与宿主机 uv.lock 严格一致
+COPY pyproject.toml uv.lock .python-version ./
+RUN uv sync --frozen --no-dev --group ml --no-install-project
+
+COPY ml ./ml
+COPY vault ./vault
+COPY db ./db
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+# 常驻循环：faces / tags / video（video 需要 llama.cpp，容器里没挂会自动跳过）
+CMD ["python", "-m", "ml.worker", "--task", "all"]
