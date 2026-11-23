@@ -65,6 +65,10 @@ async function pickDevice(deviceId: number | null) {
   await actions.setDevice(picked.value, deviceId)
 }
 
+function toggleHidden() {
+  void actions.setHidden(selection.list(), !(one.value?.hidden ?? false))
+}
+
 function remove() {
   void actions.trash(selection.list())
 }
@@ -129,6 +133,14 @@ function purge() {
       >
         <AppIcon name="camera" :size="22" />
         设备
+      </button>
+      <button
+        class="flex flex-col items-center gap-[3px] px-1.5 text-[10.5px]"
+        title="隐藏后默认所有列表不显示；顶栏「展示隐藏」开关可以重新看到"
+        @click="toggleHidden"
+      >
+        <AppIcon :name="one?.hidden ? 'eye' : 'eyeOff'" :size="22" />
+        {{ one?.hidden ? '取消隐藏' : '隐藏' }}
       </button>
       <button class="flex flex-col items-center gap-[3px] px-1.5 text-[10.5px] text-heart" @click="remove">
         <AppIcon name="trash" :size="22" />

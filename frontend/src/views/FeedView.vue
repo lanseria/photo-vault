@@ -9,6 +9,7 @@ import { useSelectionStore } from '@/stores/selection'
 import { useChromeStore } from '@/stores/chrome'
 import { usePeopleStore } from '@/stores/people'
 import { useFoldersStore } from '@/stores/folders'
+import { useRevealStore } from '@/stores/reveal'
 import { useAssetActions } from '@/composables/useAssetActions'
 import { usePhotoQuery } from '@/composables/usePhotoQuery'
 import { isGroupMode } from '@/utils/date'
@@ -35,6 +36,7 @@ const selection = useSelectionStore()
 const chrome = useChromeStore()
 const people = usePeopleStore()
 const folders = useFoldersStore()
+const reveal = useRevealStore()
 const actions = useAssetActions()
 const photo = usePhotoQuery()
 
@@ -61,6 +63,8 @@ const cfg = computed<FeedConfig>(() => ({
   px: typeof route.query.px === 'string' ? route.query.px : '',
   group: isGroupMode(route.query.group) ? route.query.group : 'day',
   device: typeof route.query.device === 'string' ? route.query.device : '',
+  // 「展示隐藏」是全局开关不是 URL 筛选：从 store 注入，变化时 cfgKey 变 → 自动重拉列表
+  showHidden: reveal.showHidden,
 }))
 
 const cfgKey = computed(() => JSON.stringify(cfg.value))
@@ -323,6 +327,16 @@ async function onTrash() {
   else photo.close()
 }
 
+/** 灯箱里隐藏：和删除一样步进到相邻一张；「展示隐藏」开着时列表只是更新角标不删行 */
+async function onHidden() {
+  const id = photo.photoId.value
+  if (!id) return
+  const next = neighbour(1) ?? neighbour(-1)
+  await actions.setHidden([id], !feed.items.find(a => a.id === id)?.hidden)
+  if (next) photo.step(next.id)
+  else photo.close()
+}
+
 async function onRestore() {
   const id = photo.photoId.value
   if (!id) return
@@ -468,6 +482,7 @@ function onKeydown(event: KeyboardEvent) {
       @trash="onTrash"
       @restore="onRestore"
       @purge="onPurge"
+      @hidden="onHidden"
     />
   </main>
 </template>

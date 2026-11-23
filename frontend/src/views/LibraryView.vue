@@ -7,6 +7,7 @@ import { useAssetActions } from '@/composables/useAssetActions'
 import { useDialogStore } from '@/stores/dialog'
 import { useFoldersStore } from '@/stores/folders'
 import { useFeedStore } from '@/stores/feed'
+import { useRevealStore } from '@/stores/reveal'
 import { useSystemStore } from '@/stores/system'
 import { isAssetDrag, readAssetDragIds } from '@/utils/dnd'
 import FeedView from './FeedView.vue'
@@ -30,6 +31,7 @@ const router = useRouter()
 const folders = useFoldersStore()
 const feed = useFeedStore()
 const dialog = useDialogStore()
+const reveal = useRevealStore()
 const system = useSystemStore()
 const actions = useAssetActions()
 
@@ -210,6 +212,13 @@ onBeforeUnmount(() => {
 // 上传等外部写入会 bump revision，未整理的素材变了，文件夹封面/计数也跟着刷
 watch(
   () => feed.revision,
+  () => void folders.load(library.value, true),
+)
+
+// 「展示隐藏」开关翻转：计数/封面/全隐藏文件夹的显隐都变了，文件夹网格要重拉
+// （下面的未整理照片流走 FeedView 自己的 cfgKey 机制，不用这里管）
+watch(
+  () => reveal.showHidden,
   () => void folders.load(library.value, true),
 )
 </script>

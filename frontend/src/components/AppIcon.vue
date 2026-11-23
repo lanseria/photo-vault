@@ -39,6 +39,12 @@ const ICONS: Record<string, string> = {
     '<rect x="3.5" y="5" width="17" height="15.5" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>',
   edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4z"/>',
   info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.6h.01"/>',
+  person:
+    '<circle cx="12" cy="7.6" r="4.1"/><path d="M12 13.9c-4.3 0-7.4 2.5-7.4 6.1h14.8c0-3.6-3.1-6.1-7.4-6.1z"/>',
+  eye:
+    '<path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>',
+  eyeOff:
+    '<path d="M4 4l16 16"/><path d="M10.6 5.9A9.6 9.6 0 0112 5.8c6 0 9.5 6.2 9.5 6.2a17.5 17.5 0 01-3.3 4M6.1 6.8A16.6 16.6 0 002.5 12S6 18.2 12 18.2a9.9 9.9 0 003.5-.6"/><path d="M9.9 9.9a3 3 0 004.2 4.2"/>',
 }
 
 const body = computed(() => ICONS[props.name] ?? '')

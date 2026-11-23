@@ -25,6 +25,8 @@ export interface FeedConfig {
   group?: GroupMode
   /** 设备筛选：'' = 全部，'unknown' = 未识别，其余为设备 id 字符串 */
   device?: string
+  /** 「展示隐藏」全局开关：true = 隐藏项混入显示（默认排除） */
+  showHidden?: boolean
 }
 
 export interface TimeSection {
@@ -97,6 +99,7 @@ export const useFeedStore = defineStore('feed', () => {
     }
     if (cfg.px) params.min_px = Number(cfg.px)
     if (cfg.device) params.device = cfg.device
+    if (cfg.showHidden) params.show_hidden = true
     return params
   }
 

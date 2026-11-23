@@ -11,6 +11,8 @@ r"""ML worker：jobs 队列消费（RAM++ 打标 + InsightFace 人脸 + Qwen3-VL
 - 写回：打标 → asset_tags(source='ai')；人脸 → faces（先删后插）+ derived/faces 裁剪；
   视频 → video_frames + video_summaries + asset_tags(source='vlm') + derived/keyframes
 - 失败重试：attempts>=3 → dead
+- 引擎先于任务就绪：模型权重 / 标签表没挂上是环境问题，那类任务先不认领、原样留在队列，
+  不靠烧任务重试来等（否则每批记一次失败，3 次后整队列变 dead）
 - 人脸暂停：ml_meta.faces_paused='1'（网页「暂停」按钮设置）时跳过 faces 认领，
   正在跑的批次收尾，pending 原样保留；网页「继续」清标记后接着跑
 - 人脸聚类：faces 队列清空且未暂停时自动跑 cluster，网页点「开始识别」即可长出人物，
@@ -84,6 +86,11 @@ where 1 - (embedding <=> %s::vector) >= %s
 limit 1
 """
 
+# 引擎加载失败后隔多久再试。以前是认领之后才加载引擎：环境缺东西（镜像里少了标签表、
+# 权重没挂上）时每批都抛异常，一批任务各记一次失败，3 次后整队列变 dead。
+# 现在加载失败的那类任务先不认领，原样留在队列里，环境修好自动接上。
+ENGINE_RETRY_S = 60.0
+
 
 def finish(conn, job_id: int, ok: bool, err: str | None = None):
     conn.execute(
@@ -156,8 +163,9 @@ def faces_batch(conn, engine: FaceEngine, cfg, jobs: list[dict]) -> None:
         if not row:
             finish(conn, job["id"], False, "asset 或 original file 不存在")
             continue
-        # 素材库不做人脸识别：历史队列里可能还有素材库的任务，直接收掉
-        if row["library"] != "gallery":
+        # 素材库不做批量人脸识别：全量入队不带它，历史队列里可能还有，直接收掉。
+        # 灯箱里单张手动入队的（payload.manual）是用户点名要识别这一张，不分库
+        if row["library"] != "gallery" and not job["payload"].get("manual"):
             finish(conn, job["id"], True, None)
             continue
 
@@ -199,6 +207,8 @@ def faces_batch(conn, engine: FaceEngine, cfg, jobs: list[dict]) -> None:
                                      "where id = %s::uuid", (fid,))
                     created.append((str(fid), face.crop, bool(hit)))
                 auto_ignored = sum(1 for _, _, hit in created if hit)
+                if created:
+                    _set_meta(conn, CLUSTER_PENDING_KEY, "1")
             finish(conn, job["id"], True)
         except Exception as exc:
             conn.rollback()
@@ -360,6 +370,16 @@ class Models:
                   f"({time.time()-t0:.1f}s)", flush=True)
         return self.vlm
 
+    def engine(self, kind: str):
+        """某类任务要用的引擎；加载不起来就抛，由调用方决定先不认领这类任务。"""
+        if kind == "analyze":
+            return self.tagger()
+        if kind == "faces":
+            return self.face_engine()
+        if kind == "video":
+            return self.vlm_engine()
+        return None
+
     def close(self) -> None:
         if self.vlm is not None:
             self.vlm.stop()
@@ -372,14 +392,44 @@ def _faces_paused(conn) -> bool:
     return bool(row and row["value"] == "1")
 
 
+# 新脸落库后 worker 紧接着会跑一轮聚类，把库里已经认识的脸认领给人物；在那之前网页读到的
+# person_id 还是空的，照着「未归类」去改会撞「已归类」。所以写脸的同一个事务里立这个标记
+# （见到新脸必见到标记），聚类跑完、或决定这一轮不聚（暂停 / 队列没清空）时再清掉；
+# 网页（灯箱手动识别）见标记就继续等，不拿中间状态当结论。
+CLUSTER_PENDING_KEY = "faces_cluster_pending"
+
+
+def _set_meta(conn, key: str, value: str) -> None:
+    conn.execute(
+        "insert into ml_meta (key, value, updated_at) values (%s, %s, now()) "
+        "on conflict (key) do update set value = excluded.value, updated_at = now()",
+        (key, value),
+    )
+
+
+def _clear_cluster_pending(conn) -> None:
+    conn.execute("delete from ml_meta where key = %s", (CLUSTER_PENDING_KEY,))
+    conn.commit()
+
+
+def _due_kinds(conn, kinds: list[str]) -> set[str]:
+    """有到期待办的任务类型。"""
+    return {r["kind"] for r in conn.execute(
+        "select distinct kind from jobs "
+        "where kind = any(%s::text[]) and state = 'pending' and run_after <= now()",
+        (kinds,))}
+
+
 def _cluster_if_drained(conn) -> None:
     """faces 队列清空且未暂停时自动聚类——「开始识别」按钮的最后一环。"""
     if _faces_paused(conn):
+        _clear_cluster_pending(conn)  # 这轮不聚：新脸就是未归类，网页不用等
         return
     left = conn.execute(
         "select count(*) c from jobs where kind = 'faces' and state = 'pending'"
     ).fetchone()["c"]
     if left:
+        _clear_cluster_pending(conn)  # 还有脸没提取完，聚类的时机在后面
         return
     t0 = time.time()
     try:
@@ -389,6 +439,8 @@ def _cluster_if_drained(conn) -> None:
     except Exception as exc:
         conn.rollback()
         print(f"[worker] 人脸聚类失败: {type(exc).__name__}: {exc}", flush=True)
+    # 聚类的写入到这儿都已提交（失败则已回滚），标记可以撤了
+    _clear_cluster_pending(conn)
 
 
 def run_worker(kinds: list[str], once: bool = False,
@@ -411,6 +463,9 @@ def _loop(models: Models, cfg: Config, kinds: list[str], once: bool,
             "update jobs set state='pending', locked_by=null, locked_at=null "
             "where state='running' and kind = any(%s::text[])", (kinds,)
         ).rowcount
+        if "faces" in kinds:
+            # 上次没走完留下的「聚类进行中」标记：重启后没有聚类在跑
+            conn.execute("delete from ml_meta where key = %s", (CLUSTER_PENDING_KEY,))
         conn.commit()
         if n:
             print(f"[worker] 回收中断任务 {n} 个", flush=True)
@@ -419,6 +474,7 @@ def _loop(models: Models, cfg: Config, kinds: list[str], once: bool,
     idle = 0
     done = 0
     pause_logged = False
+    broken: dict[str, float] = {}  # 引擎没加载起来的任务类型 → 下次重试时间
     while True:
         if max_jobs and done >= max_jobs:
             print(f"[worker] 已处理 {done} 个，--max 退出", flush=True)
@@ -431,6 +487,29 @@ def _loop(models: Models, cfg: Config, kinds: list[str], once: bool,
                 if not active and once:
                     print("[worker] faces 已暂停，--once 退出", flush=True)
                     return
+            # 引擎先于任务就绪：只给有到期待办的类型加载（保持按需加载），
+            # 加载失败的那类本轮不认领，任务不动（见 ENGINE_RETRY_S）
+            now = time.time()
+            for kind in sorted(_due_kinds(conn, active)):
+                if broken.get(kind, 0) > now:
+                    continue
+                try:
+                    models.engine(kind)
+                except Exception as exc:
+                    if kind not in broken:
+                        print(f"[worker] {kind} 引擎加载失败，这类任务先不认领，"
+                              f"{ENGINE_RETRY_S:.0f}s 后重试：{type(exc).__name__}: {exc}",
+                              flush=True)
+                    broken[kind] = now + ENGINE_RETRY_S
+                else:
+                    if kind in broken:
+                        del broken[kind]
+                        print(f"[worker] {kind} 引擎已恢复", flush=True)
+            active = [k for k in active if broken.get(k, 0) <= now]
+            if not active and once and broken:
+                print(f"[worker] 引擎没加载起来（{'、'.join(sorted(broken))}），"
+                      "--once 退出，任务保持 pending", flush=True)
+                return
             rows = conn.execute(CLAIM_SQL, (active, batch, worker)).fetchall()
             conn.commit()
             if not rows:
@@ -438,7 +517,8 @@ def _loop(models: Models, cfg: Config, kinds: list[str], once: bool,
                 if once:
                     print("[worker] 队列已清空，--once 退出", flush=True)
                     return
-                if not active and not pause_logged:
+                # 没任务可接且不是引擎没起来（那是因为暂停）时才提示一次
+                if not active and not broken and not pause_logged:
                     print("[worker] faces 已暂停（网页可继续），待命中…", flush=True)
                     pause_logged = True
                 idle += 1

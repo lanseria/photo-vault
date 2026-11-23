@@ -255,7 +255,9 @@ def _finalize(conn, dry_run: bool, stats: dict) -> None:
         removed = conn.execute(
             """delete from persons p
                where not exists (select 1 from faces f where f.person_id = p.id
-                                 and not f.ignored)"""
+                                 and not f.ignored)
+                 -- 手动关联的素材也算"有人物内容"：识别不出脸但挂了素材的人物不删
+                 and not exists (select 1 from person_assets k where k.person_id = p.id)"""
         ).rowcount
     if removed:
         print(f"   清理空人物 {removed} 个")

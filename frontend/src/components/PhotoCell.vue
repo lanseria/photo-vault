@@ -45,7 +45,10 @@ const showUnknown = computed(() => props.asset.device_unknown === true && props.
       loading="lazy"
       decoding="async"
       class="block h-full w-full object-cover"
-      :class="[selected ? 'opacity-75' : '', asset.deleted ? 'opacity-45' : '']"
+      :class="[
+        selected ? 'opacity-75' : '',
+        asset.deleted ? 'opacity-45' : asset.hidden ? 'opacity-60' : '',
+      ]"
     />
     <div v-else class="flex h-full items-center justify-center text-[11px] text-mut">
       {{ placeholder }}
@@ -71,11 +74,32 @@ const showUnknown = computed(() => props.asset.device_unknown === true && props.
       class="absolute bottom-[5px] right-1.5 text-white drop-shadow-[0_1px_2px_rgba(0,0,0,.8)]"
     />
 
+    <!-- 已识别归类（挂到人物的未忽略脸）或手动关联了人物：右下角小人标记；
+         喜欢的心形占住右下角时排到它左边 -->
+    <span
+      v-if="asset.has_person"
+      class="absolute bottom-[5px] z-[2] flex h-[18px] w-[18px] items-center justify-center rounded-full bg-black/55 text-white"
+      :class="asset.favorite ? 'right-[30px]' : 'right-1.5'"
+      title="已识别 / 已关联人物"
+    >
+      <AppIcon name="person" :size="13" :stroke="2" filled />
+    </span>
+
+    <!-- 已隐藏：右上角闭眼角标，只有「展示隐藏」开着（或回收站/剪辑箱）才会看到这个格子 -->
+    <span
+      v-if="asset.hidden"
+      class="absolute top-1.5 z-[2] flex h-[18px] w-[18px] items-center justify-center rounded-full bg-black/55 text-white"
+      :class="removable ? 'right-[30px]' : 'right-1.5'"
+      title="已隐藏：顶栏「展示隐藏」开关可控制是否混入显示"
+    >
+      <AppIcon name="eyeOff" :size="12" :stroke="2" />
+    </span>
+
     <!-- 没识别出拍摄设备的照片：右上角一个小问号，点了进灯箱可以手工归到某台设备（素材库不提示） -->
     <span
       v-if="showUnknown"
       class="absolute top-1.5 z-[2] flex h-[18px] w-[18px] items-center justify-center rounded-full bg-warn text-[11px] font-bold text-black shadow-[0_1px_3px_rgba(0,0,0,.6)]"
-      :class="removable ? 'right-[30px]' : 'right-1.5'"
+      :class="removable || asset.hidden ? 'right-[30px]' : 'right-1.5'"
       title="未识别拍摄设备"
       >?</span
     >

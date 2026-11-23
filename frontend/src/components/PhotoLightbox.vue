@@ -2,9 +2,9 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, errorText } from '@/api'
-import type { Asset, AssetInfo, Face, Person, VideoInfo } from '@/types'
+import type { Asset, AssetInfo, AssetPerson, Face, Person, VideoInfo } from '@/types'
 import { takenDateText } from '@/utils/date'
-import { fmtBytes, fmtDur, fmtFrameTime, fmtShutter, fmtStamp, sleep } from '@/utils/format'
+import { fmtBytes, fmtDur, fmtFrameTime, fmtShutter, fmtStamp, initials, sleep } from '@/utils/format'
 import { useAssetActions } from '@/composables/useAssetActions'
 import { lockScroll, unlockScroll } from '@/composables/scrollMemory'
 import { useDevicesStore } from '@/stores/devices'
@@ -31,6 +31,7 @@ const emit = defineEmits<{
   trash: []
   restore: []
   purge: []
+  hidden: []
 }>()
 
 const router = useRouter()
@@ -57,6 +58,67 @@ async function startFaceEdit(face: Face) {
   // 排除当前归属（移动到自己没有意义）；未归类则全部人物都可选
   await peopleStore.load()
   pickerPersons.value = peopleStore.persons.filter(p => p.id !== face.person_id)
+}
+
+/* ---------------- 关联人物：没检出人脸（背影/远景）但确实与人物有关的照片视频，
+   手动挂到人物名下；人物页照片流 / 计数把关联素材一起算 ---------------- */
+
+/** 这张媒体相关的人物（含 source=face 的：脸 chips 已展示，这里只渲染手动关联的） */
+const linked = ref<AssetPerson[]>([])
+const linkingPerson = ref(false)
+
+const linkedPersons = computed(() => linked.value.filter(p => p.source === 'link'))
+
+/** 关联候选：排除已相关的（再挂没有意义） */
+const linkCandidates = computed(() => {
+  const taken = new Set(linked.value.map(p => p.id))
+  return peopleStore.persons.filter(p => !taken.has(p.id))
+})
+
+function loadPersons(id: string) {
+  api
+    .assetPersons(id)
+    .then(res => {
+      if (props.asset.id === id) linked.value = res.persons
+    })
+    .catch(() => undefined)
+}
+
+/** 关联 chips 的头像：人物列表里有就用封面（自定义封面 / 人脸裁剪），没有退字母 */
+function personAvatar(id: string): string {
+  const hit = peopleStore.byId.get(id)
+  return hit ? peopleStore.coverSrc(hit) : ''
+}
+
+async function openLinkPicker() {
+  if (props.trashView || linkingPerson.value) return
+  await peopleStore.load()
+  linkingPerson.value = true
+}
+
+async function onLinkTarget(person: Person) {
+  linkingPerson.value = false
+  try {
+    const res = await api.linkPerson(props.asset.id, person.id)
+    linked.value = res.persons
+    toast.show(`已关联到「${person.name || '未命名'}」，人物页会看到这张`)
+    // 人物的计数变了
+    void peopleStore.load(true)
+  } catch (e) {
+    toast.show('关联失败：' + errorText(e).slice(0, 60))
+  }
+}
+
+async function unlinkPerson(p: AssetPerson) {
+  try {
+    const res = await api.unlinkPerson(props.asset.id, p.id)
+    linked.value = res.persons
+    toast.show('已取消关联')
+    void peopleStore.load(true)
+  } catch (e) {
+    toast.show('取消关联失败：' + errorText(e).slice(0, 60))
+    loadPersons(props.asset.id)
+  }
 }
 
 /* ---------------- 手动 AI 人脸识别：对没识别过的照片单独入队，轮询等 worker 写回 ---------------- */
@@ -87,7 +149,17 @@ async function detectFaces() {
       const found = res.faces.filter(f => !f.ignored)
       if (found.length) {
         faces.value = found
-        toast.show(`识别到 ${found.length} 张人脸，点 ✎ 可修改归属`)
+        // worker 写完新脸会紧接着跑一轮聚类，把库里已经认识的脸认领给人物；在那之前
+        // person_id 还是空的。等聚类结束再收尾，不然界面停在「未归类」，照着去改会撞「已归类」
+        if (res.clustering) continue
+        const named = found.filter(f => f.person_id).length
+        toast.show(
+          named === found.length
+            ? `识别到 ${found.length} 张人脸，已归到对应人物，点 ✎ 可修改`
+            : `识别到 ${found.length} 张人脸${
+                named ? `，其中 ${named} 张已自动归类` : ''
+              }，点 ✎ 可修改归属`,
+        )
         return
       }
       if (res.job === 'ok') {
@@ -240,11 +312,15 @@ async function copyText(text: string, label: string) {
 async function loadExtras() {
   const id = props.asset.id
   faces.value = []
+  linked.value = []
   video.value = null
   info.value = null
   livePlaying.value = false
 
   loadFaces(id)
+  loadPersons(id)
+  // 关联 chips 的头像要用人物封面
+  void peopleStore.load()
 
   // 详情（拍摄/同步/来源/EXIF/GPS）预取好，点 ⓘ 面板秒开
   api
@@ -275,24 +351,24 @@ function loadFaces(id: string) {
     .catch(() => undefined)
 }
 
-/** 人物选择器选定目标：已归类走 move，未归类走 assign，完成后刷新脸和计数 */
+/** 人物选择器选定目标：一律走 assign（未归类 / 已归到别人名下都收），完成后刷新脸和计数。
+ *  手里的归属可能是旧的（worker 的聚类随时会把未归类的脸认领走），所以不按它分 assign / move */
 async function onFaceTarget(person: Person) {
   const face = editFace.value
   if (!face || movingFace.value) return
   movingFace.value = true
   try {
-    if (face.person_id) {
-      await api.movePersonFaces(face.person_id, [face.id], person.id)
-    } else {
-      await api.assignFaces([face.id], person.id)
-    }
+    await api.assignFaces([face.id], person.id)
     toast.show(`这张脸已归到「${person.name || '未命名'}」`)
     editFace.value = null
     loadFaces(props.asset.id)
     // 人物的封面/计数变了，下次进人物页要用新数据
     void peopleStore.load(true)
   } catch (e) {
-    toast.show('修改失败：' + errorText(e).slice(0, 60))
+    toast.show('修改失败：' + errorText(e).slice(0, 60) + '，已刷新人脸，请重试')
+    // 这张脸多半刚被重新识别过（id 变了）：换成最新的，重新点 ✎ 即可
+    editFace.value = null
+    loadFaces(props.asset.id)
   } finally {
     movingFace.value = false
   }
@@ -484,7 +560,10 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="flex flex-col gap-2.5 px-4 pb-safe-16">
-      <div v-if="faces.length" class="flex flex-wrap items-center gap-2">
+      <div
+        v-if="faces.length || linkedPersons.length || !trashView"
+        class="flex flex-wrap items-center gap-2"
+      >
         <div
           v-for="face in faces"
           :key="face.id"
@@ -513,6 +592,49 @@ onBeforeUnmount(() => {
             <AppIcon name="edit" :size="13" :stroke="2.2" />
           </button>
         </div>
+
+        <!-- 手动关联的人物：没检出人脸（背影/远景…）但确实与人物有关，人工挂的 -->
+        <div
+          v-for="p in linkedPersons"
+          :key="'link-' + p.id"
+          class="inline-flex items-center gap-0.5 rounded-full bg-panel2 py-[3px] pl-[3px] pr-1 text-[13px]"
+        >
+          <button
+            class="inline-flex items-center gap-1.5 rounded-full tap"
+            :title="`查看 ${p.name || '未命名'}`"
+            @click="openPerson(p.id)"
+          >
+            <img
+              v-if="personAvatar(p.id)"
+              :src="personAvatar(p.id)"
+              alt=""
+              loading="lazy"
+              class="h-[30px] w-[30px] rounded-full bg-panel object-cover"
+            />
+            <span
+              v-else
+              class="flex h-[30px] w-[30px] items-center justify-center rounded-full bg-panel text-[11px] text-mut"
+              >{{ initials(p.name || '?') }}</span
+            >
+            <span>{{ p.name || '未命名' }}</span>
+          </button>
+          <button
+            class="flex h-6 w-6 items-center justify-center rounded-full text-mut hover:text-heart tap"
+            title="取消关联（不影响识别出来的人脸）"
+            @click="unlinkPerson(p)"
+          >
+            ✕
+          </button>
+        </div>
+
+        <button
+          v-if="!trashView"
+          class="rounded-full bg-panel2 px-3 py-1 text-[13px] text-mut tap"
+          title="没检出人脸但和某个人物有关（背影、远景…）？手动关联到人物"
+          @click="openLinkPicker"
+        >
+          ＋ 关联人物
+        </button>
       </div>
 
       <div v-if="isVideo && video?.summary" class="flex flex-col gap-1.5">
@@ -596,6 +718,15 @@ onBeforeUnmount(() => {
         </button>
         <button
           v-if="!trashView"
+          class="flex flex-col items-center gap-[3px] text-[11px]"
+          title="隐藏后默认所有列表不显示；顶栏「展示隐藏」开关可以重新看到"
+          @click="emit('hidden')"
+        >
+          <AppIcon :name="asset.hidden ? 'eye' : 'eyeOff'" :size="24" />
+          {{ asset.hidden ? '取消隐藏' : '隐藏' }}
+        </button>
+        <button
+          v-if="!trashView"
           class="flex flex-col items-center gap-[3px] text-[11px] text-heart"
           @click="emit('trash')"
         >
@@ -643,6 +774,15 @@ onBeforeUnmount(() => {
       "
       @pick="onFaceTarget"
       @close="editFace = null"
+    />
+
+    <!-- 关联人物：识别不出来的（背影等）手动挂到人物名下 -->
+    <PersonPicker
+      v-if="linkingPerson"
+      :people="linkCandidates"
+      title="这张媒体和哪个人物有关？"
+      @pick="onLinkTarget"
+      @close="linkingPerson = false"
     />
   </div>
 </template>

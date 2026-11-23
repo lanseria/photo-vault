@@ -7,6 +7,7 @@ import { useDevicesStore } from '@/stores/devices'
 import { useDialogStore } from '@/stores/dialog'
 import { useFeedStore } from '@/stores/feed'
 import { useFoldersStore } from '@/stores/folders'
+import { useRevealStore } from '@/stores/reveal'
 import { useSelectionStore } from '@/stores/selection'
 import { useSystemStore } from '@/stores/system'
 import { useToastStore } from '@/stores/toast'
@@ -60,6 +61,29 @@ export function useAssetActions() {
     selection.stop()
     toast.show(`已恢复 ${res.updated} 项`)
     await system.refreshStats()
+  }
+
+  /**
+   * 隐藏 / 取消隐藏。默认视图（「展示隐藏」开关关闭）里隐藏的项直接从列表消失；
+   * 开关打开时只是角标变化，项留在列表里。撤销 = 批量取消隐藏并重拉当前列表。
+   */
+  async function setHidden(ids: string[], value: boolean) {
+    if (!ids.length) return
+    const reveal = useRevealStore()
+    const res = await api.batch({ ids, action: value ? 'hide' : 'unhide' })
+    ids.forEach(id => feed.patch(id, { hidden: value }))
+    if (value && !reveal.showHidden) feed.removeMany(ids)
+    selection.stop()
+    toast.show(
+      value ? `已隐藏 ${res.updated} 项` : `已取消隐藏 ${res.updated} 项`,
+      value ? '撤销' : '',
+      value
+        ? async () => {
+            await api.batch({ ids, action: 'unhide' })
+            feed.requestReload()
+          }
+        : undefined,
+    )
   }
 
   async function purge(ids: string[]) {
@@ -227,6 +251,7 @@ export function useAssetActions() {
     toggleFavorite,
     trash,
     restore,
+    setHidden,
     purge,
     moveTo,
     setFolder,

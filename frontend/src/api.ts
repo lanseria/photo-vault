@@ -2,6 +2,7 @@ import type {
   Asset,
   AssetInfo,
   AssetPage,
+  AssetPerson,
   BinList,
   BinItems,
   CinemaList,
@@ -86,6 +87,8 @@ export interface AssetQuery {
   q?: string
   favorite?: boolean
   trash?: boolean
+  /** 「展示隐藏」全局开关：true = 隐藏项混入显示；false（默认）= 排除隐藏项 */
+  show_hidden?: boolean
   tag?: string
   person_id?: string
   library?: string
@@ -119,6 +122,8 @@ export const api = {
     action:
       | 'favorite'
       | 'unfavorite'
+      | 'hide'
+      | 'unhide'
       | 'trash'
       | 'restore'
       | 'move'
@@ -135,6 +140,11 @@ export const api = {
     request<{ favorite: boolean }>(
       `/api/assets/${id}/favorite`,
       jsonBody('POST', { favorite }),
+    ),
+  hidden: (id: string, hidden: boolean) =>
+    request<{ hidden: boolean }>(
+      `/api/assets/${id}/hidden`,
+      jsonBody('POST', { hidden }),
     ),
   trash: (id: string) => request<{ ok: boolean }>(`/api/assets/${id}/trash`, { method: 'POST' }),
   restore: (id: string) =>
@@ -170,9 +180,12 @@ export const api = {
       { method: 'DELETE' },
     ),
 
-  /** 这张媒体的人脸；job = 识别任务状态（null 未入队 / pending / running / ok / failed） */
+  /** 这张媒体的人脸；job = 识别任务状态（null 未入队 / pending / running / ok / failed）；
+   *  clustering = worker 正在为新识别的脸跑聚类，归属还会变 */
   faces: (id: string) =>
-    request<{ faces: Face[]; job?: string | null }>(`/api/assets/${id}/faces`),
+    request<{ faces: Face[]; job?: string | null; clustering?: boolean }>(
+      `/api/assets/${id}/faces`,
+    ),
   video: (id: string) => request<VideoInfo>(`/api/assets/${id}/video`),
 
   devices: () => request<DeviceList>('/api/devices'),
@@ -240,11 +253,28 @@ export const api = {
   /** 把若干脸移到另一个人物（聚类纠错） */
   movePersonFaces: (id: string, ids: string[], into: string) =>
     request<FaceMoveResult>(`/api/persons/${id}/faces/move`, jsonBody('POST', { ids, into })),
-  /** 把未归类的人脸挂到某个人物（灯箱修人脸归属用） */
+  /** 把人脸挂到某个人物（灯箱修归属）：未归类 / 已归到别人名下 / 已在目标名下都收，
+   *  只有不存在或已忽略的脸报错 */
   assignFaces: (ids: string[], personId: string) =>
     request<{ assigned: number }>(
       '/api/faces/assign',
       jsonBody('POST', { ids, person_id: personId }),
+    ),
+
+  /** 这张媒体相关的人物：检出脸的（source=face）+ 手动关联的（source=link） */
+  assetPersons: (id: string) =>
+    request<{ persons: AssetPerson[] }>(`/api/assets/${id}/persons`),
+  /** 手动关联人物：没检出人脸（背影/远景）但确实与该人物有关的照片/视频 */
+  linkPerson: (id: string, personId: string) =>
+    request<{ ok: boolean; persons: AssetPerson[] }>(
+      `/api/assets/${id}/persons`,
+      jsonBody('POST', { person_id: personId }),
+    ),
+  /** 取消手动关联（不影响识别出来的人脸） */
+  unlinkPerson: (id: string, personId: string) =>
+    request<{ ok: boolean; persons: AssetPerson[] }>(
+      `/api/assets/${id}/persons/${personId}`,
+      { method: 'DELETE' },
     ),
 
   bins: () => request<BinList>('/api/bins'),
@@ -265,11 +295,19 @@ export const api = {
   deliverBin: (id: string, mode: 'link' | 'copy' = 'link') =>
     request<DeliverResult>(`/api/bins/${id}/deliver`, jsonBody('POST', { mode })),
 
-  folders: (library: Library) => request<FolderList>(`/api/folders?library=${library}`),
-  createFolder: (name: string, library: Library) =>
-    request<Folder>('/api/folders', jsonBody('POST', { name, library })),
-  renameFolder: (id: string, name: string) =>
-    request<Folder>(`/api/folders/${id}`, jsonBody('PATCH', { name })),
+  /** showHidden = 「展示隐藏」开关：true 时计数/封面含隐藏素材，全隐藏文件夹也返回 */
+  folders: (library: Library, showHidden = false) =>
+    request<FolderList>(`/api/folders?library=${library}${showHidden ? '&show_hidden=true' : ''}`),
+  createFolder: (name: string, library: Library, showHidden = false) =>
+    request<Folder>(
+      `/api/folders${showHidden ? '?show_hidden=true' : ''}`,
+      jsonBody('POST', { name, library }),
+    ),
+  renameFolder: (id: string, name: string, showHidden = false) =>
+    request<Folder>(
+      `/api/folders/${id}${showHidden ? '?show_hidden=true' : ''}`,
+      jsonBody('PATCH', { name }),
+    ),
   deleteFolder: (id: string) =>
     request<{ deleted: number }>(`/api/folders/${id}`, { method: 'DELETE' }),
 

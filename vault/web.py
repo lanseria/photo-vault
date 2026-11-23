@@ -220,6 +220,7 @@ def api_stats() -> JSONResponse:
 def _asset_filters(
     *,
     trash: bool = False,
+    show_hidden: bool = False,
     library: str | None = None,
     kind: str | None = None,
     favorite: bool | None = None,
@@ -238,6 +239,11 @@ def _asset_filters(
     共用同一份，保证跳转面板看到的日期和实际列表完全一致。"""
     where = ["a.is_deleted" if trash else "not a.is_deleted"]
     params: list[Any] = []
+
+    # 隐藏是软标记（019）：默认所有视图排除；前端「展示隐藏」开关打开后混入显示。
+    # 回收站不加这个条件——隐藏过又删掉的也要能看到、能恢复。
+    if not trash and not show_hidden:
+        where.append("not a.hidden")
 
     if library:
         if library not in ("gallery", "material"):
@@ -260,14 +266,18 @@ def _asset_filters(
         )
         params.append(tag)
     if person_id:
+        pid = _asset_id(person_id)
+        # 检出脸的（未忽略）+ 手动关联的（person_assets，背影/远景这类识别不了的）都算
         where.append(
-            "exists (select 1 from faces fp where fp.asset_id=a.id "
-            "and fp.person_id=%s::uuid and not fp.ignored)"
+            """(exists (select 1 from faces fp where fp.asset_id=a.id
+                        and fp.person_id=%s::uuid and not fp.ignored)
+                or exists (select 1 from person_assets pa where pa.asset_id=a.id
+                           and pa.person_id=%s::uuid))"""
         )
-        params.append(_asset_id(person_id))
+        params.extend([pid, pid])
     if qtext:
-        # 剪辑场景的搜索必须能命中"内容"：AI/VLM 标签、视频描述、OCR、人物名，
-        # 而不只是文件名。原来只搜文件名+描述，打标结果等于白存。
+        # 剪辑场景的搜索必须能命中"内容"：AI/VLM 标签、视频描述、OCR、人物名（检出脸的
+        # 和手动关联的都算），而不只是文件名。原来只搜文件名+描述，打标结果等于白存。
         like = "%" + qtext.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         where.append(
             """(f.src_path ilike %s or f.origin_rel ilike %s or f.ext ilike %s
@@ -277,9 +287,12 @@ def _asset_filters(
                            where at4.asset_id = a.id and t4.name ilike %s)
                 or exists (select 1 from faces f4 join persons p4 on p4.id = f4.person_id
                            where f4.asset_id = a.id and not f4.ignored
-                           and p4.name ilike %s))"""
+                           and p4.name ilike %s)
+                or exists (select 1 from person_assets pk
+                           join persons p5 on p5.id = pk.person_id
+                           where pk.asset_id = a.id and p5.name ilike %s))"""
         )
-        params.extend([like] * 7)
+        params.extend([like] * 8)
     if date_from:
         where.append("a.taken_at_local >= %s")
         params.append(date_from)
@@ -327,6 +340,7 @@ def api_assets(
     tag: str | None = None,
     person_id: str | None = None,
     trash: bool = False,
+    show_hidden: bool = False,
     library: str | None = None,
     min_sec: float | None = Query(None, ge=0),
     max_sec: float | None = Query(None, ge=0),
@@ -335,7 +349,7 @@ def api_assets(
     folder: str | None = Query(None, description="文件夹 id（任意库），或 'none' 表示未整理"),
 ) -> JSONResponse:
     where, params = _asset_filters(
-        trash=trash, library=library, kind=kind, favorite=favorite, tag=tag,
+        trash=trash, show_hidden=show_hidden, library=library, kind=kind, favorite=favorite, tag=tag,
         person_id=person_id, qtext=qtext, date_from=date_from, date_to=date_to,
         min_sec=min_sec, max_sec=max_sec, min_px=min_px, device=device, folder=folder,
     )
@@ -351,13 +365,14 @@ def api_assets(
              if trash else "a.taken_at_utc desc nulls last")
     total = q(f"select count(*) c {base}", tuple(params))[0]["c"]
     rows = q(
-        f"""select a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_offset_min, a.tz_source,
+        f"""select a.id, a.kind, a.library, a.favorite, a.hidden, a.taken_at_local, a.tz_offset_min, a.tz_source,
                    a.width, a.height, a.duration_ms, a.folder_id,
                    a.device_id, d.label as device_label, d.model_raw as device_raw,
                    d.model_canonical as device_canonical, d.kind as device_kind,
                    f.sha256, f.bytes, f.ext, f.origin_rel, f.storage_mode,
                    encode(f.sha256,'hex') sha,
                    rf.ext raw_ext, rf.bytes raw_bytes,
+                   {_HAS_PERSON_SQL} has_person,
                    coalesce((select json_agg(t3.name order by t3.name)
                              from asset_tags at3 join tags t3 on t3.id = at3.tag_id
                              where at3.asset_id = a.id), '[]'::json) tags
@@ -378,6 +393,7 @@ def api_asset_dates(
     tag: str | None = None,
     person_id: str | None = None,
     trash: bool = False,
+    show_hidden: bool = False,
     library: str | None = None,
     min_sec: float | None = Query(None, ge=0),
     max_sec: float | None = Query(None, ge=0),
@@ -391,7 +407,7 @@ def api_asset_dates(
     偏移量（排在它之后的张数之和），不用为了跳转从头翻分页。
     回收站的排序是删除时间不是拍摄时间，前端在回收站隐藏跳转入口。"""
     where, params = _asset_filters(
-        trash=trash, library=library, kind=kind, favorite=favorite, tag=tag,
+        trash=trash, show_hidden=show_hidden, library=library, kind=kind, favorite=favorite, tag=tag,
         person_id=person_id, qtext=qtext, min_sec=min_sec, max_sec=max_sec,
         min_px=min_px, device=device, folder=folder,
     )
@@ -431,13 +447,19 @@ class DeliverBody(BaseModel):
     mode: str = "link"          # link=硬链接（0 字节、瞬时）；copy=独立副本
 
 
-_ITEM_COLS = """a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_source,
+# 已归类人物（挂到某人的未忽略脸）或手动关联了人物 → 列表格子右下角的小人标记
+_HAS_PERSON_SQL = """(exists (select 1 from faces fp where fp.asset_id = a.id
+                              and fp.person_id is not null and not fp.ignored)
+                     or exists (select 1 from person_assets pk where pk.asset_id = a.id))"""
+
+_ITEM_COLS = """a.id, a.kind, a.library, a.favorite, a.hidden, a.taken_at_local, a.tz_source,
                 a.width, a.height, a.duration_ms, a.folder_id,
                 a.device_id, d.label as device_label, d.model_raw as device_raw,
                 d.model_canonical as device_canonical, d.kind as device_kind,
                 f.sha256, f.bytes, f.ext, f.origin_rel,
                 encode(f.sha256,'hex') sha,
-                rf.ext raw_ext, rf.bytes raw_bytes"""
+                rf.ext raw_ext, rf.bytes raw_bytes,
+                """ + _HAS_PERSON_SQL + """ has_person"""
 
 # RAW+JPEG 是一张照片两个文件：JPEG 是 original，RAW 以 role='raw' 挂在同一个资产上。
 _RAW_JOIN = "left join files rf on rf.asset_id = a.id and rf.role = 'raw'"
@@ -450,6 +472,8 @@ def _item_json(r: dict[str, Any], ord_: int | None = None, trash: bool = False) 
         "library": r["library"],
         "sha": r["sha"],
         "favorite": r["favorite"],
+        # 软隐藏（019）：默认视图不含隐藏项，前端「展示隐藏」开关打开后混入显示
+        "hidden": bool(r.get("hidden")),
         "taken": r["taken_at_local"].isoformat() if r["taken_at_local"] else None,
         "tz_source": r["tz_source"],
         # 素材库文件夹：null = 未整理
@@ -470,6 +494,8 @@ def _item_json(r: dict[str, Any], ord_: int | None = None, trash: bool = False) 
         "raw_ext": (r.get("raw_ext") or ""),
         "raw_bytes": int(r.get("raw_bytes") or 0),
         "tags": r["tags"],
+        # 右下角小人标记：识别归类过（有挂到人物的未忽略脸）或手动关联过人物
+        "has_person": bool(r.get("has_person")),
         "deleted": trash,
     }
     if ord_ is not None:
@@ -1020,6 +1046,21 @@ def api_favorite(asset_id: str, body: FavoriteBody) -> JSONResponse:
     return JSONResponse({"id": aid, "favorite": body.favorite})
 
 
+class HiddenBody(BaseModel):
+    hidden: bool
+
+
+@app.post("/api/assets/{asset_id}/hidden")
+def api_hidden(asset_id: str, body: HiddenBody) -> JSONResponse:
+    """软隐藏 / 取消隐藏：默认所有列表视图排除，前端「展示隐藏」开关打开后混入显示。"""
+    aid = _asset_id(asset_id)
+    rows = q("update assets set hidden=%s where id=%s and not is_deleted returning id",
+             (body.hidden, aid))
+    if not rows:
+        raise HTTPException(404, "asset not found")
+    return JSONResponse({"id": aid, "hidden": body.hidden})
+
+
 @app.post("/api/assets/{asset_id}/trash")
 def api_trash(asset_id: str) -> JSONResponse:
     aid = _asset_id(asset_id)
@@ -1196,10 +1237,16 @@ def api_compress(asset_id: str, body: CompressBody | None = None) -> JSONRespons
              width, height, hashutil.average_hash(final),
              r["source_id"], r["src_path"], r["origin_path"], rel),
         )
-        # 标签跟着副本走：删掉原件后组织结构不丢
+        # 标签 / 人物关联跟着副本走：删掉原件后组织结构不丢
         conn.execute(
             """insert into asset_tags (asset_id, tag_id)
                select %s, tag_id from asset_tags where asset_id = %s
+               on conflict do nothing""",
+            (new_aid, aid),
+        )
+        conn.execute(
+            """insert into person_assets (person_id, asset_id)
+               select person_id, %s from person_assets where asset_id = %s
                on conflict do nothing""",
             (new_aid, aid),
         )
@@ -1217,7 +1264,7 @@ class TagBody(BaseModel):
 
 
 class BatchBody(BaseModel):
-    action: str                 # favorite | unfavorite | trash | restore | move | tag | untag
+    action: str                 # favorite | unfavorite | hide | unhide | trash | restore | move | tag | untag
     ids: list[str]              #        | set_folder | clear_folder（folder_id 见下）
     tag: str | None = None
     library: str | None = None  # move 时必填：gallery | material
@@ -1307,6 +1354,12 @@ def api_batch(body: BatchBody) -> JSONResponse:
                              "where id=any(%s::uuid[]) and not is_deleted", (ids,)).rowcount
         elif body.action == "unfavorite":
             n = conn.execute("update assets set favorite=false "
+                             "where id=any(%s::uuid[]) and not is_deleted", (ids,)).rowcount
+        elif body.action == "hide":
+            n = conn.execute("update assets set hidden=true "
+                             "where id=any(%s::uuid[]) and not is_deleted", (ids,)).rowcount
+        elif body.action == "unhide":
+            n = conn.execute("update assets set hidden=false "
                              "where id=any(%s::uuid[]) and not is_deleted", (ids,)).rowcount
         elif body.action == "trash":
             n = conn.execute("update assets set is_deleted=true, deleted_at=now() "
@@ -1405,16 +1458,28 @@ class FolderBody(BaseModel):
     library: str = "material"  # gallery | material：建在哪个库
 
 
-_FOLDER_LIST_SQL = """
+def _folder_list_sql(show_hidden: bool) -> str:
+    """文件夹列表的计数 / 封面。
+
+    show_hidden=False（默认，「展示隐藏」开关关闭）时：计数和封面都跳过隐藏素材——
+    封面不能是一张默认看不到的照片；内容全被隐藏的文件夹由 api_folders 整体过滤掉。
+    n_total 永远不含 hidden 条件，前端用它区分「全隐藏」（count=0 且 total>0）
+    和「真空文件夹」（total=0，建了还没放素材，照常显示）。
+    """
+    vis = "" if show_hidden else " and not a.hidden"
+    return f"""
 select fo.id, fo.name, fo.library, fo.created_at, fo.updated_at,
        (select count(*) from assets a
-         where a.folder_id = fo.id and not a.is_deleted
+         where a.folder_id = fo.id and not a.is_deleted{vis}
            and a.library = fo.library) n_assets,
+       (select count(*) from assets a
+         where a.folder_id = fo.id and not a.is_deleted
+           and a.library = fo.library) n_total,
        -- 必须 encode：sha256 列是 bytea，直接 select 出来是 Python bytes，
        -- 塞进 f-string 会变成 b"\\x.." 的 repr，拼出的封面 URL 必然 404
        (select encode(f.sha256, 'hex') from assets a
           join files f on f.asset_id = a.id and f.role = 'original'
-         where a.folder_id = fo.id and not a.is_deleted and a.library = fo.library
+         where a.folder_id = fo.id and not a.is_deleted{vis} and a.library = fo.library
          order by a.taken_at_utc desc nulls last limit 1) cover_sha
   from folders fo
 """
@@ -1426,8 +1491,11 @@ def _folder_json(r: dict[str, Any]) -> dict[str, Any]:
         "id": str(r["id"]),
         "name": r["name"],
         "library": r["library"],
+        # 「展示隐藏」关闭时 n_assets 是可见计数（不含隐藏素材）
         "count": r["n_assets"],
-        # 封面 = 文件夹里最新一条素材的缩略图；空文件夹、或缩略图还没生成的都不给 URL，
+        # 不含 hidden 条件的总数：前端据此把「内容全隐藏」的文件夹从网格里摘掉
+        "total": r["n_total"],
+        # 封面 = 文件夹里最新一条（可见）素材的缩略图；空文件夹、或缩略图还没生成的都不给 URL，
         # 前端用 🗂 占位 —— 总比一张 404 的破图好
         "cover": (f"/thumbs/{cover_sha}.webp" if cover_sha and _thumb_ok(cover_sha) else None),
         "created_at": r["created_at"].isoformat() if r["created_at"] else None,
@@ -1449,20 +1517,25 @@ def _clean_folder_name(name: str) -> str:
 
 
 @app.get("/api/folders")
-def api_folders(library: str = "material") -> JSONResponse:
+def api_folders(library: str = "material", show_hidden: bool = False) -> JSONResponse:
     lib = _clean_library(library)
     # 新建的排前面：整理素材时刚建的文件夹最常用
-    rows = q(f"{_FOLDER_LIST_SQL} where fo.library = %s order by fo.created_at desc", (lib,))
+    rows = q(f"{_folder_list_sql(show_hidden)} where fo.library = %s order by fo.created_at desc",
+             (lib,))
+    # 「展示隐藏」关闭：内容全被隐藏的文件夹跟着隐藏；真空文件夹（还没放过素材）照常显示
+    if not show_hidden:
+        rows = [r for r in rows if r["n_assets"] > 0 or r["n_total"] == 0]
     unfiled = q(
         """select count(*) c from assets
-            where library = %s and folder_id is null and not is_deleted""",
+            where library = %s and folder_id is null and not is_deleted"""
+        + ("" if show_hidden else " and not hidden"),
         (lib,),
     )[0]["c"]
     return JSONResponse({"folders": [_folder_json(r) for r in rows], "unfiled": unfiled})
 
 
 @app.post("/api/folders")
-def api_folder_create(body: FolderBody) -> JSONResponse:
+def api_folder_create(body: FolderBody, show_hidden: bool = False) -> JSONResponse:
     name = _clean_folder_name(body.name)
     lib = _clean_library(body.library)
     # 同名只在本库内查重：图库和素材库可以各有一个「毕业旅拍」
@@ -1472,12 +1545,12 @@ def api_folder_create(body: FolderBody) -> JSONResponse:
         raise HTTPException(409, "这个库里已经有同名文件夹了")
     row = q("insert into folders (name, library) values (%s, %s) returning id",
             (name, lib))[0]
-    out = q(f"select * from ({_FOLDER_LIST_SQL}) t where t.id = %s", (row["id"],))[0]
+    out = q(f"select * from ({_folder_list_sql(show_hidden)}) t where t.id = %s", (row["id"],))[0]
     return JSONResponse(_folder_json(out))
 
 
 @app.patch("/api/folders/{folder_id}")
-def api_folder_rename(folder_id: str, body: FolderBody) -> JSONResponse:
+def api_folder_rename(folder_id: str, body: FolderBody, show_hidden: bool = False) -> JSONResponse:
     fid = _asset_id(folder_id)
     name = _clean_folder_name(body.name)
     folder = q("select library from folders where id=%s::uuid", (fid,))
@@ -1492,7 +1565,7 @@ def api_folder_rename(folder_id: str, body: FolderBody) -> JSONResponse:
              "where id=%s::uuid returning id", (name, fid))
     if not rows:
         raise HTTPException(404, "文件夹不存在")
-    out = q(f"select * from ({_FOLDER_LIST_SQL}) t where t.id = %s", (fid,))[0]
+    out = q(f"select * from ({_folder_list_sql(show_hidden)}) t where t.id = %s", (fid,))[0]
     return JSONResponse(_folder_json(out))
 
 
@@ -1563,22 +1636,30 @@ class FacesRunBody(BaseModel):
 
 @app.post("/api/faces/queue/run")
 def api_faces_run(body: FacesRunBody | None = None) -> JSONResponse:
-    """人脸识别入队（幂等：已排队 / 已完成的资产不重复），顺带清掉暂停标记。
+    """人脸识别入队，顺带清掉暂停标记。
 
-    不带 asset_id 就是全量入队（人物页「开始识别」）；带 asset_id 只对这一张
-    入队——单张的显式意图优先于「素材库不跑人脸」的批量策略。
-    重复点不会把队列撑大；dead 任务不拦着重新入队（换模型重跑的场景）。
+    不带 asset_id 就是全量入队（人物页「开始识别」），幂等：已排队 / 已完成的
+    资产不重复，且只排图库——素材库不做批量人脸识别。
+    带 asset_id 只对这一张入队，是用户点名要识别：payload 带 manual，worker 不分库
+    照常识别；已经有 ok 任务也照样再排一次（上次没检出脸的、移库时脸被清掉的都得能
+    重跑），只在它正排队 / 正在跑时不重复。
+    dead 任务不拦着重新入队（换模型重跑的场景）。
     """
     assert pool is not None
     with pool.connection() as conn:
         if body and body.asset_id:
             aid = _asset_id(body.asset_id)
+            if not conn.execute("select 1 from assets where id = %s::uuid and not is_deleted",
+                                (aid,)).fetchone():
+                raise HTTPException(404, "资产不存在")
+            # priority=1 插队：认领按 priority, id 排，不插队的话这一张会排在
+            # 全量打标 / 识别的几千个任务后面，用户点了要干等
             cur = conn.execute(
-                """insert into jobs (kind, payload)
-                   select 'faces', jsonb_build_object('asset_id', %s::text)
+                """insert into jobs (kind, priority, payload)
+                   select 'faces', 1, jsonb_build_object('asset_id', %s::text, 'manual', true)
                    where not exists (
                      select 1 from jobs j
-                     where j.kind = 'faces' and j.state in ('pending', 'running', 'ok')
+                     where j.kind = 'faces' and j.state in ('pending', 'running')
                        and j.payload->>'asset_id' = %s::text
                    )""",
                 (aid, aid),
@@ -1632,16 +1713,22 @@ def _refresh_cover(conn: Any, person_id: str) -> None:
 
 @app.get("/api/persons")
 def api_persons() -> JSONResponse:
+    # n_assets = 检出脸的素材 ∪ 手动关联的素材（person_assets，见 db/018_person_links.sql）；
+    # 只有关联没有脸的人物也在列表里（识别不出来但用户挂了素材的）
     rows = q(
         """select p.id, coalesce(p.name, '') name, p.cover_face_id, p.custom_cover,
                   p.backup_cover,
                   (select count(*) from faces f join assets a on a.id = f.asset_id
                     where f.person_id = p.id and not a.is_deleted
                       and not f.ignored) n_faces,
-                  (select count(distinct f.asset_id) from faces f
-                     join assets a on a.id = f.asset_id
-                    where f.person_id = p.id and not a.is_deleted
-                      and not f.ignored) n_assets
+                  (select count(*) from (
+                     select f.asset_id from faces f
+                       join assets a on a.id = f.asset_id
+                      where f.person_id = p.id and not a.is_deleted and not f.ignored
+                     union
+                     select k.asset_id from person_assets k
+                       join assets a on a.id = k.asset_id
+                      where k.person_id = p.id and not a.is_deleted) s) n_assets
              from persons p
             order by n_assets desc, length(coalesce(p.name, '')), coalesce(p.name, ''),
                      p.created_at"""
@@ -1699,6 +1786,11 @@ def api_merge_person(person_id: str, body: MergeBody) -> JSONResponse:
             raise HTTPException(404, "目标人物不存在")
         moved = conn.execute("update faces set person_id = %s::uuid "
                              "where person_id = %s::uuid", (dst, src)).rowcount
+        # 手动关联也一起搬过去：合并后素材还挂在合并后的人物名下
+        conn.execute("""insert into person_assets (person_id, asset_id)
+                        select %s::uuid, asset_id from person_assets
+                         where person_id = %s::uuid
+                        on conflict (person_id, asset_id) do nothing""", (dst, src))
         conn.execute("delete from persons where id = %s::uuid", (src,))
         _refresh_cover(conn, dst)
     return JSONResponse({"into": dst, "faces": moved})
@@ -1741,10 +1833,14 @@ def _person_out(person_id: str) -> dict[str, Any]:
                   (select count(*) from faces f join assets a on a.id = f.asset_id
                     where f.person_id = p.id and not a.is_deleted
                       and not f.ignored) n_faces,
-                  (select count(distinct f.asset_id) from faces f
-                     join assets a on a.id = f.asset_id
-                    where f.person_id = p.id and not a.is_deleted
-                      and not f.ignored) n_assets
+                  (select count(*) from (
+                     select f.asset_id from faces f
+                       join assets a on a.id = f.asset_id
+                      where f.person_id = p.id and not a.is_deleted and not f.ignored
+                     union
+                     select k.asset_id from person_assets k
+                       join assets a on a.id = k.asset_id
+                      where k.person_id = p.id and not a.is_deleted) s) n_assets
              from persons p
             where p.id = %s::uuid""",
         (person_id,),
@@ -2000,10 +2096,12 @@ class AssignFacesBody(BaseModel):
 
 @app.post("/api/faces/assign")
 def api_assign_faces(body: AssignFacesBody) -> JSONResponse:
-    """把未归类的人脸手工挂到某个人物——聚类漏掉的脸，灯箱里修归属用。
+    """把人脸挂到某个人物——灯箱里 ✎ 修归属用。
 
-    与 move 不同：这里只收 person_id 为空（未归类）的脸；已归类的走
-    /api/persons/{pid}/faces/move。忽略的脸不支持（先恢复再归类）。
+    不看这张脸现在归谁：未归类的直接挂上；已经挂在别人名下的改挂过来（等同 move，
+    两边人物各重选封面）；已经在目标人物名下的原样成功。网页手里的归属可能是旧的
+    ——worker 的聚类随时会把未归类的脸认领走——按旧状态分 assign / move 两条路会撞
+    「已归类」。只有不存在或已忽略的脸不收（忽略的先恢复再归类）。
     """
     pid = _asset_id(body.person_id)
     ids = _uuid_list(body.ids)
@@ -2015,18 +2113,87 @@ def api_assign_faces(body: AssignFacesBody) -> JSONResponse:
                             (pid,)).fetchone():
             raise HTTPException(404, "目标人物不存在")
         rows = conn.execute(
-            """select f.id from faces f
-                where f.person_id is null and f.id = any(%s::uuid[])
-                  and not f.ignored""",
+            """select f.id, f.person_id from faces f
+                where f.id = any(%s::uuid[]) and not f.ignored""",
             (ids,),
         ).fetchall()
-        moved = [str(r["id"]) for r in rows]
-        if len(moved) != len(ids):
-            raise HTTPException(400, "有些脸不存在、已归类或已忽略")
+        if len(rows) != len(ids):
+            raise HTTPException(400, "有些脸不存在或已忽略")
         conn.execute("update faces set person_id = %s::uuid "
-                     "where id = any(%s::uuid[])", (pid, moved))
-        _refresh_cover(conn, pid)
-    return JSONResponse({"assigned": len(moved), "person": _person_out(pid)})
+                     "where id = any(%s::uuid[])", (pid, ids))
+        # 改挂会让原人物的封面/计数失效，目标人物也一样
+        for touched in {str(r["person_id"]) for r in rows if r["person_id"]} | {pid}:
+            _refresh_cover(conn, touched)
+    return JSONResponse({"assigned": len(rows), "person": _person_out(pid)})
+
+
+# ---- 人物关联素材：没检出人脸（背影/远景）但确实与人物有关的照片视频，手动挂到人物名下。
+#      与 faces 解耦（见 db/018_person_links.sql）：重跑识别、聚类都不动关联；
+#      人物页照片流 / 计数 / 按人名搜索把关联素材一起算。
+
+
+def _asset_persons_out(asset_id: str) -> list[dict[str, Any]]:
+    """这张媒体的关联人物 + 检出脸的人物（前端只渲染前者，后者已在脸 chips 里）。
+
+    source: link = 手动关联；face = 这张图里检出过此人未忽略的脸（识别事实，不可取消，
+    只会随识别变化）。一张素材同时存在两种时以 face 为准显示。
+    """
+    rows = q(
+        """select p.id, coalesce(p.name, '') name,
+                  (exists (select 1 from faces f where f.asset_id = %s::uuid
+                            and f.person_id = p.id and not f.ignored)) has_face
+             from (
+               select pa.person_id from person_assets pa where pa.asset_id = %s::uuid
+               union
+               select f.person_id from faces f
+                where f.asset_id = %s::uuid and f.person_id is not null and not f.ignored
+             ) s join persons p on p.id = s.person_id
+            order by has_face desc, p.name""",
+        (asset_id, asset_id, asset_id),
+    )
+    return [{
+        "id": str(r["id"]),
+        "name": r["name"],
+        "source": "face" if r["has_face"] else "link",
+    } for r in rows]
+
+
+@app.get("/api/assets/{asset_id}/persons")
+def api_asset_persons(asset_id: str) -> JSONResponse:
+    return JSONResponse({"persons": _asset_persons_out(_asset_id(asset_id))})
+
+
+class LinkPersonBody(BaseModel):
+    person_id: str
+
+
+@app.post("/api/assets/{asset_id}/persons")
+def api_link_person(asset_id: str, body: LinkPersonBody) -> JSONResponse:
+    """把这张媒体关联到某个人物（幂等：重复关联原样成功）。"""
+    aid = _asset_id(asset_id)
+    pid = _asset_id(body.person_id)
+    assert pool is not None
+    with pool.connection() as conn:
+        if not conn.execute("select 1 from persons where id = %s::uuid", (pid,)).fetchone():
+            raise HTTPException(404, "目标人物不存在")
+        if not conn.execute("select 1 from assets where id = %s::uuid", (aid,)).fetchone():
+            raise HTTPException(404, "资产不存在")
+        conn.execute("""insert into person_assets (person_id, asset_id)
+                        values (%s::uuid, %s::uuid)
+                        on conflict (person_id, asset_id) do nothing""", (pid, aid))
+    return JSONResponse({"ok": True, "persons": _asset_persons_out(aid)})
+
+
+@app.delete("/api/assets/{asset_id}/persons/{person_id}")
+def api_unlink_person(asset_id: str, person_id: str) -> JSONResponse:
+    """取消关联。只动 person_assets：识别出来的人脸归属不归这里管。"""
+    aid = _asset_id(asset_id)
+    pid = _asset_id(person_id)
+    n = q("delete from person_assets where person_id = %s::uuid and asset_id = %s::uuid "
+          "returning asset_id", (pid, aid))
+    if not n:
+        raise HTTPException(404, "这张媒体没有关联这个人物")
+    return JSONResponse({"ok": True, "persons": _asset_persons_out(aid)})
 
 
 @app.get("/api/assets/{asset_id}/faces")
@@ -2047,8 +2214,12 @@ def api_asset_faces(asset_id: str) -> JSONResponse:
             order by id desc limit 1""",
         (aid,),
     )
+    # 聚类进行中（ml_meta 标记，worker 写新脸的同一个事务里立）：这批脸的归属还会变，
+    # 灯箱手动识别见到它就继续等，不拿「未归类」的中间状态当结论
+    clustering = q("select 1 from ml_meta where key = 'faces_cluster_pending'")
     return JSONResponse({
         "job": job[0]["state"] if job else None,
+        "clustering": bool(clustering),
         "faces": [{
             "id": str(r["id"]),
             "person_id": str(r["person_id"]) if r["person_id"] else None,
@@ -2144,13 +2315,14 @@ def _upload_source(conn: Any) -> int:
 
 
 _UPLOAD_ASSET_SQL = """
-select a.id, a.kind, a.library, a.favorite, a.taken_at_local, a.tz_source,
+select a.id, a.kind, a.library, a.favorite, a.hidden, a.taken_at_local, a.tz_source,
        a.width, a.height, a.duration_ms, a.folder_id,
        a.device_id, d.label as device_label, d.model_raw as device_raw,
        d.model_canonical as device_canonical, d.kind as device_kind,
        f.bytes, f.ext, f.origin_rel,
        encode(f.sha256, 'hex') sha,
        rf.ext raw_ext, rf.bytes raw_bytes,
+       """ + _HAS_PERSON_SQL + """ has_person,
        coalesce((select json_agg(t.name order by t.name)
                  from asset_tags at2 join tags t on t.id = at2.tag_id
                  where at2.asset_id = a.id), '[]'::json) tags

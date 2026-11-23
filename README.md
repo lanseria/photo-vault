@@ -223,6 +223,14 @@ uv run --group ml python -m ml.worker --task tags
 视频用入库时的海报帧打标。换打标模型 = 词表变化：跑迁移（`photo-vault initdb`）
 会清空旧 `source='ai'` 标签与旧任务，再 `ml.enqueue` 全量重算。
 
+worker 也可以随 compose 常驻：`docker compose up -d --build` 会多起一个 `worker` 服务
+（`python -m ml.worker --task all`，和 app 共用 `/host`），模型权重与 `ml/assets/ram` 标签表
+从宿主机只读挂载。没配 GPU 时 ONNX 回退 CPU，只是慢；视频模型（Windows 版 llama.cpp）没挂进
+容器，`video` 任务原样留在队列里，仍由宿主机 worker 跑。
+
+> 引擎起不来（权重或标签表没挂上）时，worker 不会认领那一类任务——任务保持 `pending`，
+> 日志里有一行「引擎加载失败」，每分钟重试；修好挂载后自动接上，不会把队列烧成 `dead`。
+
 ---
 
 ## 人脸识别（InsightFace + ONNX Runtime CUDA）
@@ -231,9 +239,18 @@ uv run --group ml python -m ml.worker --task tags
 （`w600k_r50.onnx`，112×112 输入、512 维向量）——就是 InsightFace 官方 buffalo_l 包里的
 两张图，直接喂 ONNX Runtime，**完全不用 TensorRT**。
 
-> **素材库不跑人脸**：`library='material'` 的资产不排 `faces` 任务、worker 见到会直接
+> **素材库不跑（批量）人脸**：`library='material'` 的资产不排 `faces` 任务、worker 见到会直接
 > 收掉；把照片移进素材库时，已有的脸（`faces` 行 + `derived/faces` 裁剪图）一并清掉。
-> 打标（RAM++）和视频摘要照常。所以「人物」页和人物检索里只有图库的人。
+> 打标（RAM++）和视频摘要照常。所以「开始识别」跑完，「人物」页和人物检索里只有图库的人。
+> 例外是灯箱里对单张点「识别人脸」：任务是点名要识别这一张（`payload.manual`），worker 不分库
+> 照常识别，素材库的照片也会检出脸并参与聚类。写完新脸后 worker 会紧接着聚一轮类（库里已经
+> 认识的脸直接被认领走），这期间 `ml_meta.faces_cluster_pending` 立着、`/api/assets/{id}/faces`
+> 返回 `clustering: true`，灯箱等它撤了才收尾，不会停在「未归类」的中间状态上。
+
+**手动关联人物**（`person_assets`，见 db/018_person_links.sql）：背影、远景这类识别不出人脸的
+照片/视频，在灯箱里点「＋ 关联人物」手动挂到某个人名下。关联与 `faces` 完全解耦——重跑识别、
+聚类都不动它；人物页照片流、`n_assets` 计数、按人名搜索把关联素材一起算；合并人物时关联跟着
+搬过去，人物解散时随人物删除。灯箱压缩副本继承关联（和标签一样）。
 
 > 为什么不 `pip install insightface`：它硬依赖 CPU 版 onnxruntime，和 onnxruntime-gpu 同装会
 > 往同一个 `onnxruntime/` 目录写两份文件，Python 版本和 CUDA DLL 随机对不上。本项目只需要

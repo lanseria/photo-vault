@@ -29,9 +29,13 @@ export interface Asset {
   raw_ext: string
   raw_bytes: number
   tags: string[]
+  /** 右下角小人标记：识别归类过（有挂到人物的未忽略脸）或手动关联过人物 */
+  has_person?: boolean
   /** 素材库文件夹；null = 未整理 */
   folder_id?: string | null
   deleted?: boolean
+  /** 软隐藏：默认所有视图不含隐藏项，顶栏「展示隐藏」开关打开后混入显示 */
+  hidden?: boolean
   /** 剪辑箱里的序号 */
   ord?: number
 }
@@ -84,6 +88,14 @@ export interface PersonList {
   unassigned_faces: number
 }
 
+/** /api/assets/{id}/persons：这张媒体相关的人物（检出脸的 + 手动关联的） */
+export interface AssetPerson {
+  id: string
+  name: string
+  /** face = 这张图里检出过此人未忽略的脸（识别结果）；link = 手动关联（背影等识别不了的） */
+  source: 'face' | 'link'
+}
+
 /** 人脸任务队列（/api/faces/queue）：worker 在宿主机跑，网页只管启停和看进度 */
 export interface FaceQueue {
   paused: boolean
@@ -123,8 +135,11 @@ export interface Folder {
   id: string
   name: string
   library: Library
+  /** 「展示隐藏」关闭时是不含隐藏素材的可见计数 */
   count: number
-  /** 封面缩略图 URL（文件夹里最新一条素材）；空文件夹为 null */
+  /** 不含隐藏条件的总数：count=0 且 total>0 = 内容全被隐藏（开关关闭时文件夹整体隐藏） */
+  total: number
+  /** 封面缩略图 URL（文件夹里最新一条可见素材）；空文件夹为 null */
   cover: string | null
   created_at: string | null
   updated_at: string | null

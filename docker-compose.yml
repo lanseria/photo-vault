@@ -88,6 +88,9 @@ services:
       # 权重只读挂载：insightface 人脸模型 + RAM++ 打标权重
       - ./models/insightface:/models/insightface:ro
       - ./models/ram_plus_int8.onnx:/models/ram_plus_int8.onnx:ro
+      # RAM++ 的标签表 / 阈值表 / 中文对照表。ml/assets 不进构建上下文（.dockerignore），
+      # 镜像里没有：缺了它打标引擎起不来，worker 会先不认领 analyze（见 ml/worker.py）。
+      - ./ml/assets/ram:/app/ml/assets/ram:ro
     # 有 NVIDIA GPU 且 Docker Desktop（WSL2）已配好 GPU 时，去掉下面的注释走 GPU：
     # deploy:
     #   resources:
