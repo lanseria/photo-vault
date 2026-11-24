@@ -15,6 +15,7 @@ import { useToastStore } from '@/stores/toast'
 import AppIcon from './AppIcon.vue'
 import DevicePicker from './DevicePicker.vue'
 import PersonPicker from './PersonPicker.vue'
+import VideoPlayer from './VideoPlayer.vue'
 
 const props = defineProps<{
   asset: Asset
@@ -45,7 +46,7 @@ const toast = useToastStore()
 const faces = ref<Face[]>([])
 const video = ref<VideoInfo | null>(null)
 const livePlaying = ref(false)
-const videoEl = ref<HTMLVideoElement | null>(null)
+const playerRef = ref<InstanceType<typeof VideoPlayer> | null>(null)
 const pickingDevice = ref(false)
 
 /* ---------------- 修人脸归属：✎ 打开人物选择器，已归类的走 move，未归类走 assign ---------------- */
@@ -394,10 +395,7 @@ async function removeTag(name: string) {
 }
 
 function seek(ms: number) {
-  const el = videoEl.value
-  if (!el) return
-  el.currentTime = ms / 1000
-  void el.play().catch(() => undefined)
+  playerRef.value?.seek(ms)
 }
 
 function openPerson(personId: string) {
@@ -467,22 +465,20 @@ onBeforeUnmount(() => {
           alt=""
           class="max-h-full max-w-full object-contain"
         />
-        <video
+        <!-- xgplayer + 转码兜底：HEVC 等浏览器放不了的编码自动切服务端转码流 -->
+        <VideoPlayer
           v-else-if="isVideo"
-          ref="videoEl"
+          ref="playerRef"
           :src="`/file/${asset.id}`"
-          controls
-          autoplay
-          playsinline
-          class="max-h-full max-w-full"
+          :transcode-src="`/transcode/${asset.id}`"
+          :codec="info?.vcodec"
+          :poster="asset.sha ? `/thumbs/${asset.sha}.webp` : null"
         />
-        <video
+        <VideoPlayer
           v-else
           :src="`/file/${asset.id}?role=live_motion`"
-          controls
-          autoplay
-          playsinline
-          class="max-h-full max-w-full"
+          :transcode-src="`/transcode/${asset.id}?role=live_motion`"
+          :codec="info?.vcodec"
         />
 
         <button

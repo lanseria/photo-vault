@@ -203,6 +203,8 @@ export interface AssetInfo {
   sha: string
   device: AssetInfoDevice | null
   lens: string | null
+  /** 视频编码（ffprobe 的 codec_name，如 hevc / avc1）；照片为 null */
+  vcodec: string | null
   exif: AssetInfoExif | null
   gps: { lon: number; lat: number } | null
 }

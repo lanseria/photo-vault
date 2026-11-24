@@ -4,6 +4,7 @@ import { api, errorText } from '@/api'
 import { useToastStore } from '@/stores/toast'
 import { fmtBytes, fmtDur, fmtStamp } from '@/utils/format'
 import { smartPop, type PeekAsset, type PeekRect } from '@/utils/peek'
+import VideoPlayer from './VideoPlayer.vue'
 
 /**
  * 照片/视频 hover 快速预览框（人脸抽屉和图库/素材库等照片流共用）。
@@ -245,16 +246,14 @@ async function compress() {
         </button>
       </div>
       <div class="relative bg-black">
-        <video
+        <!-- xgplayer + 转码兜底：HEVC 等浏览器放不了的编码自动切服务端转码流 -->
+        <div
           v-if="asset.kind === 'video' && playing"
-          :src="`/file/${asset.id}`"
-          controls
-          autoplay
-          playsinline
           class="w-full"
-          :style="{ maxHeight: `${layout.mediaH}px` }"
-          @ended="playing = false"
-        />
+          :style="{ height: `${layout.mediaH}px` }"
+        >
+          <VideoPlayer :src="`/file/${asset.id}`" :transcode-src="`/transcode/${asset.id}`" @ended="playing = false" />
+        </div>
         <template v-else>
           <img
             v-if="asset.sha"

@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import threading
 import time
 import uuid as uuidlib
@@ -543,6 +544,7 @@ def api_asset_info(asset_id: str) -> JSONResponse:
                   f.src_path, f.imported_at,
                   s.kind as source_kind, s.label as source_label, s.root_path as source_root,
                   e.iso, e.aperture, e.shutter, e.focal_mm, e.orientation,
+                  e.raw->>'codec' as vcodec,
                   rf.ext as raw_ext, rf.bytes as raw_bytes
            from assets a
            left join devices d on d.id = a.device_id
@@ -597,6 +599,9 @@ def api_asset_info(asset_id: str) -> JSONResponse:
             if r["model_raw"] else None
         ),
         "lens": r["lens"],
+        # 视频编码（ffprobe 的 codec_name，如 hevc / avc1）：前端拿它探测浏览器
+        # 能不能原生解码，决定直接播还是走 /transcode 转码兜底
+        "vcodec": r["vcodec"],
         "exif": (
             {"iso": r["iso"], "aperture": num(r["aperture"]), "shutter": num(r["shutter"]),
              "focal_mm": num(r["focal_mm"]), "orientation": r["orientation"]}
@@ -2931,6 +2936,81 @@ def original(asset_id: str, role: str = "original") -> FileResponse:
     if not p.exists():
         raise HTTPException(404, "file missing on disk")
     return FileResponse(p)
+
+
+# ---------------------------------------------------------------- 视频转码兜底
+# 原件是 HEVC 等浏览器放不了的编码时（Windows Chrome 没硬解就是只有声音没画面），
+# 用 ffmpeg 现场转成 H.264/AAC MP4。结果按内容 sha 缓存到 derived/transcoded，
+# 第二次起直接回缓存文件；同一次转码的并发请求共用同一把锁，不会跑两遍 ffmpeg。
+
+_TRANSCODE_LOCKS: dict[str, threading.Lock] = {}
+_TRANSCODE_LOCKS_GUARD = threading.Lock()
+
+
+def _transcoded_path(sha: str, role: str) -> Path:
+    name = sha if role == "original" else f"{sha}-{role}"
+    return cfg.derived_root / "transcoded" / sha[0:2] / sha[2:4] / f"{name}.mp4"
+
+
+def _serve_transcoded(dst: Path) -> FileResponse:
+    return FileResponse(dst, media_type="video/mp4",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+@app.get("/transcode/{asset_id}")
+def transcode(asset_id: str, role: str = "original") -> FileResponse:
+    """浏览器原生放不了的视频转成 H.264/AAC MP4 再回。
+
+    首次访问同步等 ffmpeg 跑完（手机视频一般十几秒到一两分钟），期间播放器的
+    请求一直挂着，前端只看到 loading；跑完 FileResponse 支持 Range，可拖进度条。"""
+    aid = _asset_id(asset_id)
+    if role not in ("original", "live_motion"):
+        raise HTTPException(400, "bad role")
+    rows = q("""select encode(f.sha256,'hex') as sha, f.rel_path
+                  from files f where f.asset_id=%s and f.role=%s limit 1""", (aid, role))
+    if not rows:
+        raise HTTPException(404, "not found")
+    sha: str = rows[0]["sha"]
+    src = cfg.vault_root / rows[0]["rel_path"]
+    if not src.exists():
+        raise HTTPException(404, "file missing on disk")
+    if not shutil.which("ffmpeg"):
+        raise HTTPException(503, "ffmpeg 不可用，无法转码")
+
+    dst = _transcoded_path(sha, role)
+    if dst.exists():
+        return _serve_transcoded(dst)
+
+    lock_key = f"{sha}:{role}"
+    with _TRANSCODE_LOCKS_GUARD:
+        lock = _TRANSCODE_LOCKS.setdefault(lock_key, threading.Lock())
+    with lock:
+        if dst.exists():                    # 等锁期间别的请求已经转好了
+            return _serve_transcoded(dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        # 先写 .part，成功才挪进缓存位，不留半成品给下一个请求
+        tmp = dst.with_name(dst.stem + ".part.mp4")
+        cmd = [
+            "ffmpeg", "-v", "error", "-y", "-i", str(src),
+            "-map", "0:v:0", "-map", "0:a:0?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+            # 长边压到 1920 就够网页看了，竖拍视频靠 rotation 元数据自动转正
+            "-vf", "scale='min(iw,1920)':-2",
+            "-c:a", "aac", "-b:a", "160k",
+            "-movflags", "+faststart",      # moov 前置，浏览器拿到头就能播
+            "-f", "mp4", str(tmp),
+        ]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=1800)
+        except subprocess.TimeoutExpired:
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(504, "转码超时（视频太长），可稍后重试")
+        if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            tail = proc.stderr.decode("utf-8", "ignore")[-200:]
+            tmp.unlink(missing_ok=True)
+            raise HTTPException(500, "转码失败" + (f"：{tail}" if tail else ""))
+        os.replace(tmp, dst)                # derived 与临时文件同卷，原子
+    return _serve_transcoded(dst)
 
 
 # ---------------------------------------------------------------- 浏览器可显示的预览

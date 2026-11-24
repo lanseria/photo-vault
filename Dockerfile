@@ -6,10 +6,11 @@ WORKDIR /web
 RUN npm install -g pnpm@12.16.0
 
 # 先只拷依赖清单：pnpm-lock.yaml 不变时命中缓存层，改前端代码不再重装依赖。
-# --allow-build：pnpm 12 的供应链保护默认拦所有依赖的安装脚本，
-# esbuild 的 postinstall 只是个二进制自检，显式放行（干净环境里没有本地批准记录）。
+# --allow-build：pnpm 12 的供应链保护默认拦所有依赖的安装脚本，逐个显式放行
+#（干净环境里没有本地批准记录）：esbuild 是二进制自检；core-js / es5-ext 是
+# xgplayer（经 core-js）带进来的，postinstall 只打印赞助提示。
 COPY frontend/package.json frontend/pnpm-lock.yaml ./
-RUN pnpm install --frozen-lockfile --allow-build=esbuild
+RUN pnpm install --frozen-lockfile --allow-build=esbuild --allow-build=core-js --allow-build=es5-ext
 
 COPY frontend/ ./
 # 产物落在 /vault/static（vite outDir = ../vault/static）；走 pnpm build，类型检查失败会挡住镜像构建

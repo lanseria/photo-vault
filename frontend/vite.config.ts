@@ -7,7 +7,7 @@ import UnoCSS from 'unocss/vite'
 // 这样 vite 的 HMR 和后端的 Range/缩略图缓存都能各自发挥。
 const BACKEND = process.env.VITE_BACKEND ?? 'http://127.0.0.1:7878'
 
-const proxied = ['/api', '/thumbs', '/faces', '/frames', '/file', '/preview']
+const proxied = ['/api', '/thumbs', '/faces', '/frames', '/file', '/preview', '/transcode']
 
 export default defineConfig({
   plugins: [vue(), UnoCSS()],
@@ -20,6 +20,14 @@ export default defineConfig({
     emptyOutDir: true,
     target: 'es2022',
     chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      output: {
+        // xgplayer 单独分包：合进主 chunk 后 esbuild minify 的输入会超 1MB，
+        // 触发 esbuild 的临时文件回退，Windows 上有杀软时这个临时文件删不掉，
+        // 构建直接报 "remove ... Access is denied"（也顺带把播放器拆成独立并行下载）
+        manualChunks: id => (id.includes('xgplayer') ? 'xgplayer' : undefined),
+      },
+    },
   },
   server: {
     port: 5173,
